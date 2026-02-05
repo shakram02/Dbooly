@@ -1,0 +1,332 @@
+{
+  "name": "dbooly",
+  "displayName": "dbooly",
+  "description": "Database viewer and query tool for VSCode",
+  "version": "0.0.1",
+  "publisher": "your-publisher-name",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:sql"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "dbooly.addConnection",
+        "title": "Add Connection",
+        "category": "dbooly",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dbooly.editConnection",
+        "title": "Edit Connection",
+        "category": "dbooly",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "dbooly.deleteConnection",
+        "title": "Delete Connection",
+        "category": "dbooly",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dbooly.listConnections",
+        "title": "List Connections",
+        "category": "dbooly"
+      },
+      {
+        "command": "dbooly.refreshConnections",
+        "title": "Refresh Connections",
+        "category": "dbooly",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dbooly.searchTables",
+        "title": "Search Tables",
+        "category": "dbooly",
+        "icon": "$(search)"
+      },
+      {
+        "command": "dbooly.viewTableData",
+        "title": "View Data",
+        "category": "dbooly",
+        "icon": "$(table)"
+      },
+      {
+        "command": "dbooly.starTable",
+        "title": "Star Table",
+        "category": "dbooly",
+        "icon": "$(star-empty)"
+      },
+      {
+        "command": "dbooly.unstarTable",
+        "title": "Unstar Table",
+        "category": "dbooly",
+        "icon": "$(star-full)"
+      },
+      {
+        "command": "dbooly.setActiveConnection",
+        "title": "Set as Active",
+        "category": "dbooly",
+        "icon": "$(check)"
+      },
+      {
+        "command": "dbooly.addScript",
+        "title": "Add Script",
+        "category": "dbooly",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dbooly.addScriptFolder",
+        "title": "Add Folder",
+        "category": "dbooly",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "dbooly.openScript",
+        "title": "Open",
+        "category": "dbooly",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "dbooly.renameScript",
+        "title": "Rename",
+        "category": "dbooly",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "dbooly.deleteScript",
+        "title": "Delete",
+        "category": "dbooly",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dbooly.renameScriptFolder",
+        "title": "Rename",
+        "category": "dbooly",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "dbooly.deleteScriptFolder",
+        "title": "Delete",
+        "category": "dbooly",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dbooly.newScriptInFolder",
+        "title": "New Script",
+        "category": "dbooly",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dbooly.newFolderInFolder",
+        "title": "New Folder",
+        "category": "dbooly",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "dbooly.executeSql",
+        "title": "Execute SQL",
+        "category": "dbooly",
+        "icon": "$(play)"
+      },
+      {
+        "command": "dbooly.cancelQuery",
+        "title": "Cancel Query",
+        "category": "dbooly",
+        "icon": "$(debug-stop)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dbooly",
+          "title": "dbooly",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dbooly": [
+        {
+          "id": "dbooly.connections",
+          "name": "Connections"
+        },
+        {
+          "id": "dbooly.scripts",
+          "name": "Scripts"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "dbooly.connections",
+        "contents": "No connections configured.\n[Add Connection](command:dbooly.addConnection)"
+      },
+      {
+        "view": "dbooly.scripts",
+        "contents": "Save a script to see it here.\n[Add Script](command:dbooly.addScript)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "dbooly.addConnection",
+          "when": "view == dbooly.connections",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dbooly.refreshConnections",
+          "when": "view == dbooly.connections",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dbooly.addScript",
+          "when": "view == dbooly.scripts",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dbooly.addScriptFolder",
+          "when": "view == dbooly.scripts",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "dbooly.searchTables",
+          "when": "view == dbooly.connections && viewItem == connection-loaded",
+          "group": "inline"
+        },
+        {
+          "command": "dbooly.viewTableData",
+          "when": "view == dbooly.connections && viewItem =~ /^table/",
+          "group": "inline"
+        },
+        {
+          "command": "dbooly.starTable",
+          "when": "view == dbooly.connections && viewItem == table",
+          "group": "inline"
+        },
+        {
+          "command": "dbooly.unstarTable",
+          "when": "view == dbooly.connections && viewItem == table-starred",
+          "group": "inline"
+        },
+        {
+          "command": "dbooly.setActiveConnection",
+          "when": "view == dbooly.connections && viewItem =~ /^connection/",
+          "group": "0_active"
+        },
+        {
+          "command": "dbooly.editConnection",
+          "when": "view == dbooly.connections && viewItem =~ /^connection/",
+          "group": "1_edit"
+        },
+        {
+          "command": "dbooly.deleteConnection",
+          "when": "view == dbooly.connections && viewItem =~ /^connection/",
+          "group": "2_delete"
+        },
+        {
+          "command": "dbooly.viewTableData",
+          "when": "view == dbooly.connections && viewItem =~ /^table/",
+          "group": "1_view"
+        },
+        {
+          "command": "dbooly.starTable",
+          "when": "view == dbooly.connections && viewItem == table",
+          "group": "2_star"
+        },
+        {
+          "command": "dbooly.unstarTable",
+          "when": "view == dbooly.connections && viewItem == table-starred",
+          "group": "2_star"
+        },
+        {
+          "command": "dbooly.openScript",
+          "when": "view == dbooly.scripts && viewItem == script",
+          "group": "inline"
+        },
+        {
+          "command": "dbooly.openScript",
+          "when": "view == dbooly.scripts && viewItem == script",
+          "group": "1_open"
+        },
+        {
+          "command": "dbooly.renameScript",
+          "when": "view == dbooly.scripts && viewItem == script",
+          "group": "2_edit"
+        },
+        {
+          "command": "dbooly.deleteScript",
+          "when": "view == dbooly.scripts && viewItem == script",
+          "group": "3_delete"
+        },
+        {
+          "command": "dbooly.newScriptInFolder",
+          "when": "view == dbooly.scripts && viewItem == scriptFolder",
+          "group": "1_new@1"
+        },
+        {
+          "command": "dbooly.newFolderInFolder",
+          "when": "view == dbooly.scripts && viewItem == scriptFolder",
+          "group": "1_new@2"
+        },
+        {
+          "command": "dbooly.renameScriptFolder",
+          "when": "view == dbooly.scripts && viewItem == scriptFolder",
+          "group": "2_edit"
+        },
+        {
+          "command": "dbooly.deleteScriptFolder",
+          "when": "view == dbooly.scripts && viewItem == scriptFolder",
+          "group": "3_delete"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "dbooly.executeSql",
+          "when": "editorLangId == sql",
+          "group": "dbooly@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "dbooly.executeSql",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && editorLangId == sql"
+      },
+      {
+        "command": "dbooly.cancelQuery",
+        "key": "escape",
+        "when": "editorTextFocus && dbooly.queryExecuting"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "watch": "npm run build -- --watch",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "esbuild": "^0.20.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "mysql2": "^3.16.3"
+  }
+}
