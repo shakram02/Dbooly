@@ -126,6 +126,12 @@ export class SqlExecutor {
             }
         }
 
+        // Ensure password is set before executing (prompt if missing)
+        if (!await this.connectionManager.ensurePassword(activeConnectionId)) {
+            this.onError(`No password set for "${connection.name}". Set a password to execute queries.`);
+            return;
+        }
+
         // Execute query
         this.onExecuting(connection.name);
         this.abortController = new AbortController();

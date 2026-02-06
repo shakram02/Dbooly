@@ -149,10 +149,14 @@ export class SqlDiagnosticsProvider implements vscode.Disposable {
         }
 
         try {
-            const conn = await this.connectionManager.getConnectionWithPassword(activeId);
-            if (!conn) {
+            // Ensure password is set before fetching schema (don't prompt - just skip if missing)
+            const hasPassword = await this.connectionManager.getConnectionWithPassword(activeId);
+            if (!hasPassword?.password) {
+                // No password set yet - skip schema loading silently
+                // The password prompt will be shown when user explicitly executes a query
                 return;
             }
+            const conn = hasPassword;
 
             const provider = getSchemaProvider(conn.type);
             const tables = await provider.listTables(this.connectionPool, conn);

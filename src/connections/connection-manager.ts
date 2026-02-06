@@ -12,6 +12,9 @@ export class ConnectionManager {
     private _onDidChangeActiveConnection = new vscode.EventEmitter<ConnectionId | null>();
     readonly onDidChangeActiveConnection = this._onDidChangeActiveConnection.event;
 
+    // Mutex for password prompts - prevents multiple concurrent prompts
+    private passwordPromptInProgress: Map<ConnectionId, Promise<boolean>> = new Map();
+
     constructor(private readonly storage: ConnectionStorage) {}
 
     /**
@@ -124,6 +127,57 @@ export class ConnectionManager {
 
         const password = await this.storage.getPassword(id) || '';
         return { ...connection, password };
+    }
+
+    /**
+     * Prompts user to set password if missing. Returns true if password exists or was set.
+     * Uses a mutex to prevent multiple concurrent password prompts for the same connection.
+     */
+    async ensurePassword(id: ConnectionId): Promise<boolean> {
+        const connection = this.connections.get(id);
+        if (!connection) {
+            return false;
+        }
+
+        const existingPassword = await this.storage.getPassword(id);
+        if (existingPassword) {
+            return true;
+        }
+
+        // Check if a prompt is already in progress for this connection
+        const existingPrompt = this.passwordPromptInProgress.get(id);
+        if (existingPrompt) {
+            return existingPrompt;
+        }
+
+        // Create and store the prompt promise
+        const promptPromise = this.showPasswordPrompt(id, connection.name);
+        this.passwordPromptInProgress.set(id, promptPromise);
+
+        try {
+            return await promptPromise;
+        } finally {
+            this.passwordPromptInProgress.delete(id);
+        }
+    }
+
+    /**
+     * Internal method that shows the actual password prompt UI.
+     */
+    private async showPasswordPrompt(id: ConnectionId, connectionName: string): Promise<boolean> {
+        const password = await vscode.window.showInputBox({
+            prompt: `Enter password for "${connectionName}" (no password stored)`,
+            password: true,
+            ignoreFocusOut: true,
+            placeHolder: 'Database password'
+        });
+
+        if (password) {
+            await this.storage.setPassword(id, password);
+            return true;
+        }
+
+        return false;
     }
 
     getStorage(): ConnectionStorage {

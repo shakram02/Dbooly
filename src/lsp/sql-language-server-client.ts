@@ -117,6 +117,12 @@ export class SqlLanguageServerClient implements vscode.Disposable {
             return;
         }
 
+        // Skip if no password is set - LSP will start once user sets password via query execution
+        if (!config.password) {
+            log(`SQL Language Server: No password set for "${config.name}", skipping`);
+            return;
+        }
+
         // Check for cached schema
         if (this.schemaCache.hasCachedSchema(connectionId)) {
             const schemaPath = this.schemaCache.getSchemaFilePath(connectionId);
