@@ -193,7 +193,7 @@ export class SqlDiagnosticsProvider implements vscode.Disposable {
 
         // Check for unmatched parentheses
         let parenDepth = 0;
-        let parenPositions: number[] = [];
+        const parenPositions: number[] = [];
         for (let i = 0; i < text.length; i++) {
             if (text[i] === '(') {
                 parenDepth++;
