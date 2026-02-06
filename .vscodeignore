@@ -5,8 +5,9 @@ node_modules/**
 openspec/**
 .claude/**
 .cursor/**
-.gitignore
 .git/**
+.gitignore
+.eslintrc.json
 tsconfig.json
 **/*.map
 **/*.ts
@@ -14,3 +15,6 @@ tsconfig.json
 CLAUDE.md
 AGENTS.md
 *.vsix
+scripts/**
+secrets.local
+*.local
