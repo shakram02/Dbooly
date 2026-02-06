@@ -275,13 +275,17 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
         }
 
         try {
-            const configWithPassword = await this.connectionManager.getConnectionWithPassword(table.connectionId);
-            if (!configWithPassword) {
-                return [new ErrorTreeItem('Connection not found')];
-            }
+            const columns = await this.connectionManager.withAuthenticatedConnection(
+                table.connectionId,
+                async (configWithPassword) => {
+                    const provider = getSchemaProvider(connection.type);
+                    return provider.listColumns(this.connectionPool, configWithPassword, table.name);
+                }
+            );
 
-            const provider = getSchemaProvider(connection.type);
-            const columns = await provider.listColumns(this.connectionPool, configWithPassword, table.name);
+            if (columns === null) {
+                return [new ErrorTreeItem('No password set')];
+            }
 
             this.columnCache.set(cacheKey, columns);
 
@@ -309,18 +313,18 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
         }
 
         try {
-            // Ensure password is set (prompt if missing)
-            if (!await this.connectionManager.ensurePassword(connectionId)) {
+            const tables = await this.connectionManager.withAuthenticatedConnection(
+                connectionId,
+                async (configWithPassword) => {
+                    const provider = getSchemaProvider(connection.type);
+                    return provider.listTables(this.connectionPool, configWithPassword);
+                }
+            );
+
+            if (tables === null) {
+                // Password prompt cancelled
                 return [];
             }
-
-            const configWithPassword = await this.connectionManager.getConnectionWithPassword(connectionId);
-            if (!configWithPassword) {
-                throw new Error('Connection not found');
-            }
-
-            const provider = getSchemaProvider(connection.type);
-            const tables = await provider.listTables(this.connectionPool, configWithPassword);
 
             this.tableCache.set(connectionId, tables);
 

@@ -52,6 +52,17 @@ export class SqlLanguageServerClient implements vscode.Disposable {
             })
         );
 
+        // Subscribe to password set events - auto-start when password becomes available
+        this.disposables.push(
+            this.connectionManager.onDidSetPassword((connectionId) => {
+                // Only start if this is the active connection
+                if (connectionId === this.connectionManager.getActiveConnectionId()) {
+                    log('SQL Language Server: Password set, starting server');
+                    this.onConnectionChange(connectionId);
+                }
+            })
+        );
+
         // Track cursor changes to re-sync when moving between statements
         this.disposables.push(
             vscode.window.onDidChangeTextEditorSelection((e) => {
@@ -111,46 +122,41 @@ export class SqlLanguageServerClient implements vscode.Disposable {
      * Starts the LSP using cached schema if available, otherwise fetches first.
      */
     private async startWithCachedSchema(connectionId: ConnectionId): Promise<void> {
-        const config = await this.connectionManager.getConnectionWithPassword(connectionId);
-        if (!config) {
-            logError(`SQL Language Server: Connection ${connectionId} not found`);
-            return;
-        }
+        // Use silent mode - don't prompt for password, just skip if not available
+        await this.connectionManager.withAuthenticatedConnection(
+            connectionId,
+            async (config) => {
+                // Check for cached schema
+                if (this.schemaCache.hasCachedSchema(connectionId)) {
+                    const schemaPath = this.schemaCache.getSchemaFilePath(connectionId);
+                    const meta = this.schemaCache.getCacheMetadata(connectionId);
+                    log(`SQL Language Server: Using cached schema (${meta?.tableCount} tables from ${meta?.cachedAt})`);
 
-        // Skip if no password is set - LSP will start once user sets password via query execution
-        if (!config.password) {
-            log(`SQL Language Server: No password set for "${config.name}", skipping`);
-            return;
-        }
+                    // Start with cached schema immediately
+                    await this.startWithJsonAdapter(connectionId, schemaPath);
 
-        // Check for cached schema
-        if (this.schemaCache.hasCachedSchema(connectionId)) {
-            const schemaPath = this.schemaCache.getSchemaFilePath(connectionId);
-            const meta = this.schemaCache.getCacheMetadata(connectionId);
-            log(`SQL Language Server: Using cached schema (${meta?.tableCount} tables from ${meta?.cachedAt})`);
+                    // Refresh schema in background, restart LSP when done
+                    this.refreshAndRestart(connectionId, config);
+                } else {
+                    // No cache - must fetch schema first (blocking)
+                    log(`SQL Language Server: No cached schema, fetching...`);
 
-            // Start with cached schema immediately
-            await this.startWithJsonAdapter(connectionId, schemaPath);
-
-            // Refresh schema in background, restart LSP when done
-            this.refreshAndRestart(connectionId, config);
-        } else {
-            // No cache - must fetch schema first (blocking)
-            log(`SQL Language Server: No cached schema, fetching...`);
-
-            try {
-                const schemaPath = await this.schemaCache.refreshSchema(
-                    connectionId,
-                    config,
-                    this.connectionPool
-                );
-                await this.startWithJsonAdapter(connectionId, schemaPath);
-            } catch (error) {
-                logError('SQL Language Server: Failed to fetch schema', error);
-                // Fall back to database adapter (slow but works)
-                await this.startWithDatabaseAdapter(connectionId, config);
-            }
-        }
+                    try {
+                        const schemaPath = await this.schemaCache.refreshSchema(
+                            connectionId,
+                            config,
+                            this.connectionPool
+                        );
+                        await this.startWithJsonAdapter(connectionId, schemaPath);
+                    } catch (error) {
+                        logError('SQL Language Server: Failed to fetch schema', error);
+                        // Fall back to database adapter (slow but works)
+                        await this.startWithDatabaseAdapter(connectionId, config);
+                    }
+                }
+            },
+            { silent: true }
+        );
     }
 
     /**

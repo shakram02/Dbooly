@@ -126,29 +126,29 @@ export class SqlExecutor {
             }
         }
 
-        // Ensure password is set before executing (prompt if missing)
-        if (!await this.connectionManager.ensurePassword(activeConnectionId)) {
-            this.onError(`No password set for "${connection.name}". Set a password to execute queries.`);
-            return;
-        }
-
-        // Execute query
+        // Execute query with authenticated connection
         this.onExecuting(connection.name);
         this.abortController = new AbortController();
 
         try {
-            const configWithPassword = await this.connectionManager.getConnectionWithPassword(activeConnectionId);
-            if (!configWithPassword) {
-                throw new Error('Connection credentials not found');
-            }
-
-            const provider = getSchemaProvider(connection.type);
-            const result = await provider.executeQuery(
-                this.connectionPool,
-                configWithPassword,
-                trimmedSql,
-                { signal: this.abortController.signal }
+            const result = await this.connectionManager.withAuthenticatedConnection(
+                activeConnectionId,
+                async (configWithPassword) => {
+                    const provider = getSchemaProvider(connection.type);
+                    return provider.executeQuery(
+                        this.connectionPool,
+                        configWithPassword,
+                        trimmedSql,
+                        { signal: this.abortController!.signal }
+                    );
+                }
             );
+
+            if (result === null) {
+                // Password prompt cancelled or auth failed
+                this.onError(`No password set for "${connection.name}". Set a password to execute queries.`);
+                return;
+            }
 
             log(`Execute: Query completed, ${result.rows.length} rows returned`);
             this.onResult(result);

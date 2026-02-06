@@ -82,6 +82,23 @@ export class SqlDiagnosticsProvider implements vscode.Disposable {
             })
         );
 
+        // Auto-load schema when password becomes available
+        this.disposables.push(
+            connectionManager.onDidSetPassword((connectionId) => {
+                // Only reload if this is the active connection
+                if (connectionId === connectionManager.getActiveConnectionId()) {
+                    this.schema = null;
+                    this.schemaConnectionId = null;
+                    // Re-validate all open SQL documents
+                    for (const doc of vscode.workspace.textDocuments) {
+                        if (doc.languageId === 'sql') {
+                            this.updateDiagnostics(doc);
+                        }
+                    }
+                }
+            })
+        );
+
         // Initial validation of open SQL documents
         for (const doc of vscode.workspace.textDocuments) {
             if (doc.languageId === 'sql') {
@@ -148,45 +165,43 @@ export class SqlDiagnosticsProvider implements vscode.Disposable {
             return;
         }
 
-        try {
-            // Ensure password is set before fetching schema (don't prompt - just skip if missing)
-            const hasPassword = await this.connectionManager.getConnectionWithPassword(activeId);
-            if (!hasPassword?.password) {
-                // No password set yet - skip schema loading silently
-                // The password prompt will be shown when user explicitly executes a query
-                return;
-            }
-            const conn = hasPassword;
-
-            const provider = getSchemaProvider(conn.type);
-            const tables = await provider.listTables(this.connectionPool, conn);
-
-            const schemaInfo: SchemaInfo = {
-                tables: new Map(),
-                columns: new Map()
-            };
-
-            for (const table of tables) {
-                schemaInfo.tables.set(table.name.toLowerCase(), table);
-
+        // Use silent mode - don't prompt for password, just skip if not available
+        await this.connectionManager.withAuthenticatedConnection(
+            activeId,
+            async (conn) => {
                 try {
-                    const columns = await provider.listColumns(this.connectionPool, conn, table.name);
-                    const columnMap = new Map<string, ColumnInfo>();
-                    for (const col of columns) {
-                        columnMap.set(col.name.toLowerCase(), col);
-                    }
-                    schemaInfo.columns.set(table.name.toLowerCase(), columnMap);
-                } catch (error) {
-                    // Continue with other tables
-                }
-            }
+                    const provider = getSchemaProvider(conn.type);
+                    const tables = await provider.listTables(this.connectionPool, conn);
 
-            this.schema = schemaInfo;
-            this.schemaConnectionId = activeId;
-            log(`SqlDiagnostics: Loaded schema with ${tables.length} tables`);
-        } catch (error) {
-            logError('SqlDiagnostics: Failed to load schema', error);
-        }
+                    const schemaInfo: SchemaInfo = {
+                        tables: new Map(),
+                        columns: new Map()
+                    };
+
+                    for (const table of tables) {
+                        schemaInfo.tables.set(table.name.toLowerCase(), table);
+
+                        try {
+                            const columns = await provider.listColumns(this.connectionPool, conn, table.name);
+                            const columnMap = new Map<string, ColumnInfo>();
+                            for (const col of columns) {
+                                columnMap.set(col.name.toLowerCase(), col);
+                            }
+                            schemaInfo.columns.set(table.name.toLowerCase(), columnMap);
+                        } catch {
+                            // Continue with other tables
+                        }
+                    }
+
+                    this.schema = schemaInfo;
+                    this.schemaConnectionId = activeId;
+                    log(`SqlDiagnostics: Loaded schema with ${tables.length} tables`);
+                } catch (error) {
+                    logError('SqlDiagnostics: Failed to load schema', error);
+                }
+            },
+            { silent: true }
+        );
     }
 
     /**

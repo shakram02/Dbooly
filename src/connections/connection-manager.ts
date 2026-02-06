@@ -12,6 +12,10 @@ export class ConnectionManager {
     private _onDidChangeActiveConnection = new vscode.EventEmitter<ConnectionId | null>();
     readonly onDidChangeActiveConnection = this._onDidChangeActiveConnection.event;
 
+    // Password set event - fired when user sets a password (for auto-starting background services)
+    private _onDidSetPassword = new vscode.EventEmitter<ConnectionId>();
+    readonly onDidSetPassword = this._onDidSetPassword.event;
+
     // Mutex for password prompts - prevents multiple concurrent prompts
     private passwordPromptInProgress: Map<ConnectionId, Promise<boolean>> = new Map();
 
@@ -42,10 +46,11 @@ export class ConnectionManager {
     }
 
     /**
-     * Disposes of the EventEmitter. Should be called on extension deactivation.
+     * Disposes of the EventEmitters. Should be called on extension deactivation.
      */
     dispose(): void {
         this._onDidChangeActiveConnection.dispose();
+        this._onDidSetPassword.dispose();
     }
 
     async initialize(): Promise<void> {
@@ -130,8 +135,51 @@ export class ConnectionManager {
     }
 
     /**
+     * Executes an operation with an authenticated connection.
+     * Centralizes password checking and prompting logic.
+     *
+     * @param id - Connection ID
+     * @param operation - Async operation to execute with the authenticated config
+     * @param options.silent - If true, returns null when no password instead of prompting
+     * @returns Operation result, or null if authentication failed/cancelled
+     */
+    async withAuthenticatedConnection<T>(
+        id: ConnectionId,
+        operation: (config: ConnectionConfigWithPassword) => Promise<T>,
+        options?: { silent?: boolean }
+    ): Promise<T | null> {
+        const connection = this.connections.get(id);
+        if (!connection) {
+            return null;
+        }
+
+        const existingPassword = await this.storage.getPassword(id);
+
+        if (!existingPassword) {
+            // No password set
+            if (options?.silent) {
+                return null;
+            }
+
+            // Prompt for password
+            const passwordSet = await this.promptForPassword(id, connection.name);
+            if (!passwordSet) {
+                return null;
+            }
+        }
+
+        const config = await this.getConnectionWithPassword(id);
+        if (!config) {
+            return null;
+        }
+
+        return operation(config);
+    }
+
+    /**
      * Prompts user to set password if missing. Returns true if password exists or was set.
      * Uses a mutex to prevent multiple concurrent password prompts for the same connection.
+     * @internal Prefer using withAuthenticatedConnection instead.
      */
     async ensurePassword(id: ConnectionId): Promise<boolean> {
         const connection = this.connections.get(id);
@@ -144,6 +192,14 @@ export class ConnectionManager {
             return true;
         }
 
+        return this.promptForPassword(id, connection.name);
+    }
+
+    /**
+     * Prompts user for password with mutex to prevent concurrent prompts.
+     * Fires onDidSetPassword event when password is successfully set.
+     */
+    private async promptForPassword(id: ConnectionId, connectionName: string): Promise<boolean> {
         // Check if a prompt is already in progress for this connection
         const existingPrompt = this.passwordPromptInProgress.get(id);
         if (existingPrompt) {
@@ -151,7 +207,7 @@ export class ConnectionManager {
         }
 
         // Create and store the prompt promise
-        const promptPromise = this.showPasswordPrompt(id, connection.name);
+        const promptPromise = this.showPasswordPrompt(id, connectionName);
         this.passwordPromptInProgress.set(id, promptPromise);
 
         try {
@@ -174,6 +230,7 @@ export class ConnectionManager {
 
         if (password) {
             await this.storage.setPassword(id, password);
+            this._onDidSetPassword.fire(id);
             return true;
         }
 
