@@ -59,7 +59,7 @@ export class ConnectionManager {
             throw new Error(`Connection with name "${config.name}" already exists`);
         }
 
-        const id = crypto.randomUUID();
+        const id = this.generateDeterministicId(config.name);
         const { password, ...connectionWithoutPassword } = config;
         const connection: ConnectionConfig = { id, ...connectionWithoutPassword };
 
@@ -137,5 +137,9 @@ export class ConnectionManager {
             }
         }
         return undefined;
+    }
+
+    private generateDeterministicId(name: string): ConnectionId {
+        return crypto.createHash('sha256').update(name).digest('hex').slice(0, 12);
     }
 }
