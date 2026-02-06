@@ -475,22 +475,47 @@ export class TableDataPanel {
             text-align: center;
             color: var(--vscode-descriptionForeground);
         }
+        .query-display-wrapper {
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+            margin-bottom: 12px;
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+        .query-display-wrapper.hidden {
+            display: none;
+        }
+        .query-toggle {
+            flex-shrink: 0;
+            font-size: 10px;
+            transition: transform 0.15s;
+            opacity: 0.7;
+            padding-top: 8px;
+        }
+        .query-display-wrapper.expanded .query-toggle {
+            transform: rotate(90deg);
+        }
         .query-display {
+            flex: 1;
+            min-width: 0;
             background-color: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.1));
             border: 1px solid var(--vscode-widget-border, var(--vscode-input-border));
             border-radius: 4px;
             padding: 8px 12px;
-            margin-bottom: 12px;
             font-family: var(--vscode-editor-font-family, monospace);
             font-size: 12px;
             color: var(--vscode-foreground);
-            overflow-x: auto;
-            white-space: nowrap;
-            flex-shrink: 0;
             user-select: text;
         }
-        .query-display:empty {
-            display: none;
+        .query-display-wrapper:not(.expanded) .query-display {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .query-display-wrapper.expanded .query-display {
+            white-space: pre-wrap;
+            word-break: break-word;
         }
         .truncation-notice {
             display: flex;
@@ -526,7 +551,10 @@ export class TableDataPanel {
         <span id="executionTime" class="execution-time"></span>
         <span id="rowCount" class="row-count"></span>
     </div>
-    <div id="queryDisplay" class="query-display"></div>
+    <div id="queryWrapper" class="query-display-wrapper hidden">
+        <span class="query-toggle">&#9658;</span>
+        <div id="queryDisplay" class="query-display"></div>
+    </div>
     <div id="truncationNotice" class="truncation-notice hidden">
         <span class="info-icon">&#9432;</span>
         <span>Showing first 1000 rows. Add a LIMIT clause to your query for specific results.</span>
@@ -540,6 +568,7 @@ export class TableDataPanel {
         const rowCountDiv = document.getElementById('rowCount');
         const executionTimeDiv = document.getElementById('executionTime');
         const searchInput = document.getElementById('searchInput');
+        const queryWrapper = document.getElementById('queryWrapper');
         const queryDisplayDiv = document.getElementById('queryDisplay');
         const truncationNotice = document.getElementById('truncationNotice');
         const titleEl = document.getElementById('title');
@@ -551,10 +580,32 @@ export class TableDataPanel {
         let allColumns = [];
         let allRows = [];
         let originalRows = []; // Keep original order for unsort
+        let currentQuery = ''; // Store original query for expanded view
         let totalRows = 0;
         let columnWidths = {};
         let currentSortColumn = null;
         let currentSortDirection = null;
+
+        // Query display toggle functionality
+        function normalizeQuery(query) {
+            return query.replace(/\\s+/g, ' ').trim();
+        }
+
+        function updateQueryDisplay() {
+            if (!currentQuery) {
+                queryWrapper.classList.add('hidden');
+                return;
+            }
+            queryWrapper.classList.remove('hidden');
+            const isExpanded = queryWrapper.classList.contains('expanded');
+            queryDisplayDiv.textContent = isExpanded ? currentQuery : normalizeQuery(currentQuery);
+        }
+
+        queryWrapper.addEventListener('click', () => {
+            if (!currentQuery) return;
+            queryWrapper.classList.toggle('expanded');
+            updateQueryDisplay();
+        });
 
         function escapeHtml(text) {
             if (text === null || text === undefined) {
@@ -816,7 +867,9 @@ export class TableDataPanel {
                     executionTimeDiv.textContent = '';
                     truncationNotice.classList.add('hidden');
                     contentDiv.innerHTML = '<div class="loading">' + (message.message || 'Loading data...') + '</div>';
-                    queryDisplayDiv.textContent = '';
+                    currentQuery = '';
+                    queryWrapper.classList.add('hidden');
+                    queryWrapper.classList.remove('expanded');
                     break;
                 case 'data':
                     if (message.sort) {
@@ -826,7 +879,9 @@ export class TableDataPanel {
                         currentSortColumn = null;
                         currentSortDirection = null;
                     }
-                    queryDisplayDiv.textContent = message.query || '';
+                    currentQuery = message.query || '';
+                    queryWrapper.classList.remove('expanded');
+                    updateQueryDisplay();
                     if (message.executionTime !== undefined) {
                         executionTimeDiv.textContent = message.executionTime + 'ms';
                     }
@@ -838,7 +893,9 @@ export class TableDataPanel {
                     renderTable(message.columns, message.rows);
                     break;
                 case 'nonSelectResult':
-                    queryDisplayDiv.textContent = message.query || '';
+                    currentQuery = message.query || '';
+                    queryWrapper.classList.remove('expanded');
+                    updateQueryDisplay();
                     executionTimeDiv.textContent = message.executionTime + 'ms';
                     rowCountDiv.textContent = message.affectedRows + ' affected';
                     truncationNotice.classList.add('hidden');
@@ -849,7 +906,9 @@ export class TableDataPanel {
                 case 'error':
                     rowCountDiv.textContent = '';
                     executionTimeDiv.textContent = '';
-                    queryDisplayDiv.textContent = '';
+                    currentQuery = '';
+                    queryWrapper.classList.add('hidden');
+                    queryWrapper.classList.remove('expanded');
                     truncationNotice.classList.add('hidden');
                     contentDiv.innerHTML = '<div class="error"><span class="error-icon">&#10060;</span> ' + escapeHtml(message.message) + '</div>';
                     searchInput.disabled = true;

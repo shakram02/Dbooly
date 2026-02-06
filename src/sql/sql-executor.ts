@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ConnectionManager } from '../connections/connection-manager';
 import { ConnectionPool } from '../connections/connection-pool';
 import { getSchemaProvider, QueryExecutionResult } from '../providers/schema-provider';
+import { splitSqlStatements, findStatementAtLine } from './sql-statement-splitter';
 import { log, logError } from '../logger';
 
 export type DestructiveOpType = 'delete-no-where' | 'drop' | 'truncate';
@@ -46,14 +47,31 @@ export function analyzeDestructiveOp(sql: string): DestructiveOp | null {
 
 /**
  * Gets the SQL to execute from the active editor.
- * If text is selected, returns the selection. Otherwise returns the entire document.
+ * Priority:
+ * 1. If text is selected, returns the selection
+ * 2. Otherwise returns the statement at the cursor position
+ * 3. Returns null if cursor is not in any statement
  */
-export function getSqlFromEditor(editor: vscode.TextEditor): string {
+export function getSqlFromEditor(editor: vscode.TextEditor): string | null {
     const selection = editor.selection;
+
+    // If there's an explicit selection, use it
     if (!selection.isEmpty) {
         return editor.document.getText(selection);
     }
-    return editor.document.getText();
+
+    // Find the statement at the cursor position
+    const text = editor.document.getText();
+    const cursorLine = editor.selection.active.line;
+    const statements = splitSqlStatements(text);
+
+    const currentStmt = findStatementAtLine(statements, cursorLine);
+    if (currentStmt) {
+        return currentStmt.text;
+    }
+
+    // No statement at cursor
+    return null;
 }
 
 export class SqlExecutor {

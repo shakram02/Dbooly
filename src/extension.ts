@@ -10,14 +10,15 @@ import { registerScriptCommands } from './scripts/script-commands';
 import { SqlExecutor, getSqlFromEditor } from './sql/sql-executor';
 import { SqlCodeLensProvider } from './sql/sql-codelens-provider';
 import { TableDataPanel } from './views/table-data-panel';
-import { SchemaCache } from './schema/schema-cache';
-import { SqlCompletionProvider } from './completion/sql-completion-provider';
+import { SqlLanguageServerClient } from './lsp/sql-language-server-client';
+import { SqlDiagnosticsProvider } from './diagnostics/sql-diagnostics-provider';
+import { SqlFormatter } from './sql/sql-formatter';
 import { initLogger, log } from './logger';
 
 let connectionManager: ConnectionManager;
 let connectionPool: ConnectionPool;
 let sqlExecutor: SqlExecutor;
-let schemaCache: SchemaCache;
+let sqlLanguageServerClient: SqlLanguageServerClient;
 
 export async function activate(context: vscode.ExtensionContext) {
     const outputChannel = initLogger();
@@ -74,6 +75,10 @@ export async function activate(context: vscode.ExtensionContext) {
             }
 
             const sql = getSqlFromEditor(editor);
+            if (!sql) {
+                vscode.window.showWarningMessage('No SQL statement at cursor');
+                return;
+            }
             sqlExecutor.execute(sql);
         })
     );
@@ -109,25 +114,32 @@ export async function activate(context: vscode.ExtensionContext) {
         codeLensProvider
     );
 
-    // Initialize Schema Cache and Completion Provider for SQL files
-    schemaCache = new SchemaCache(connectionManager, connectionPool, context.globalStorageUri);
-    const completionProvider = new SqlCompletionProvider(schemaCache, connectionManager);
+    // Initialize SQL language server for SQL completions and hover
+    // Server starts lazily when a database connection is activated
+    // Uses schema caching for instant completions
+    sqlLanguageServerClient = new SqlLanguageServerClient(connectionManager, connectionPool);
+    context.subscriptions.push(sqlLanguageServerClient);
+    sqlLanguageServerClient.initialize();
+
+    // Register SQL formatter as a VSCode formatting provider
+    const sqlFormatter = new SqlFormatter(connectionManager);
     context.subscriptions.push(
-        vscode.languages.registerCompletionItemProvider(
+        vscode.languages.registerDocumentFormattingEditProvider(
             { language: 'sql' },
-            completionProvider,
-            '.' // Trigger character for dot notation (table.column)
-        ),
-        schemaCache
+            sqlFormatter
+        )
     );
 
-    // Register command to refresh schema cache
+    // Also register manual format command for context menu
     context.subscriptions.push(
-        vscode.commands.registerCommand('dbooly.refreshSchemaCache', async () => {
-            await schemaCache.refresh();
-            vscode.window.showInformationMessage('Schema cache refreshed');
+        vscode.commands.registerCommand('dbooly.formatSql', () => {
+            sqlFormatter.formatDocument();
         })
     );
+
+    // Initialize SQL diagnostics provider for syntax and schema validation
+    const diagnosticsProvider = new SqlDiagnosticsProvider(connectionManager, connectionPool);
+    context.subscriptions.push(diagnosticsProvider);
 
     // Register pool, connection manager, and panel disposal for cleanup on deactivation
     context.subscriptions.push({
