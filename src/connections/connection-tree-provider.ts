@@ -314,6 +314,27 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
                 throw new Error('Connection not found');
             }
 
+            // Check if password is missing (shared connection without local password)
+            if (!configWithPassword.password) {
+                const action = await vscode.window.showWarningMessage(
+                    `Connection "${connection.name}" has no password set. This connection may have been shared by a teammate.`,
+                    'Set Password',
+                    'Cancel'
+                );
+                if (action === 'Set Password') {
+                    const password = await vscode.window.showInputBox({
+                        prompt: `Enter password for "${connection.name}"`,
+                        password: true,
+                        ignoreFocusOut: true
+                    });
+                    if (password) {
+                        await this.connectionManager.getStorage().setPassword(connectionId, password);
+                        return this.fetchTablesForConnection(connectionId);
+                    }
+                }
+                return [];
+            }
+
             const provider = getSchemaProvider(connection.type);
             const tables = await provider.listTables(this.connectionPool, configWithPassword);
 
