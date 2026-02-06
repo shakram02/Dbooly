@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { ConnectionConfig, ConnectionId } from '../models/connection';
 
 const CONNECTIONS_FILE = '.vscode/dbooly-connections.json';

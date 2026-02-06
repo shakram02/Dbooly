@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ConnectionConfigWithPassword, DatabaseType } from '../models/connection';
+import { ConnectionConfigWithPassword } from '../models/connection';
 
 type FormData = Omit<ConnectionConfigWithPassword, 'id'>;
 

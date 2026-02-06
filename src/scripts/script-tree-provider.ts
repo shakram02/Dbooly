@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { Script, ScriptFolder, ScriptId, FolderId } from '../models/script';
+import { Script, ScriptFolder } from '../models/script';
 import { ScriptStorage } from './script-storage';
 
 export class ScriptTreeItem extends vscode.TreeItem {

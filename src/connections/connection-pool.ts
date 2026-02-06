@@ -1,5 +1,5 @@
 import * as mysql from 'mysql2/promise';
-import { ConnectionConfigWithPassword, ConnectionId, DatabaseType } from '../models/connection';
+import { ConnectionConfigWithPassword, ConnectionId } from '../models/connection';
 
 export type PooledConnection = mysql.Connection;
 
@@ -51,7 +51,7 @@ export class ConnectionPool {
 
     async dispose(): Promise<void> {
         const closePromises = Array.from(this.connections.entries()).map(
-            async ([id, conn]) => {
+            async ([_id, conn]) => {
                 try {
                     await conn.end();
                 } catch {
