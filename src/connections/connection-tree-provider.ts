@@ -444,7 +444,7 @@ export function registerTreeView(
                 return;
             }
 
-            TableDataPanel.show(
+            TableDataPanel.showTableData(
                 connection,
                 table,
                 async (sort?: SortOptions) => {

@@ -3,7 +3,14 @@
 src/**
 node_modules/**
 openspec/**
+.claude/**
+.cursor/**
 .gitignore
+.git/**
 tsconfig.json
 **/*.map
 **/*.ts
+!dist/**
+CLAUDE.md
+AGENTS.md
+*.vsix

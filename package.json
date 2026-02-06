@@ -3,8 +3,17 @@
   "displayName": "dbooly",
   "description": "Database viewer and query tool for VSCode",
   "version": "0.0.1",
-  "publisher": "your-publisher-name",
+  "publisher": "shakram02",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shakram02/Dbooly"
+  },
+  "homepage": "https://github.com/shakram02/Dbooly#readme",
+  "bugs": {
+    "url": "https://github.com/shakram02/Dbooly/issues"
+  },
+  "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -327,13 +336,18 @@
     "vscode:prepublish": "npm run build",
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
     "watch": "npm run build -- --watch",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "package": "vsce package",
+    "publish": "./scripts/publish.sh",
+    "publish:patch": "./scripts/publish.sh --patch",
+    "publish:minor": "./scripts/publish.sh --minor"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.19.0",
     "@typescript-eslint/parser": "^6.19.0",
+    "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.20.0",
     "eslint": "^8.56.0",
     "typescript": "^5.3.0"
