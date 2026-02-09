@@ -1,9 +1,23 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from './connection-manager';
 import { testConnection } from './connection-tester';
-import { ConnectionId } from '../models/connection';
+import { ConnectionConfig, ConnectionId, isMySQLConnection } from '../models/connection';
 import { ConnectionTreeItem, ConnectionTreeProvider } from './connection-tree-provider';
 import { ConnectionFormPanel } from './connection-form';
+
+function getConnectionDescription(c: ConnectionConfig): string {
+    if (isMySQLConnection(c)) {
+        return `${c.type} - ${c.host}:${c.port}`;
+    }
+    return `${c.type} - ${c.filePath}`;
+}
+
+function getConnectionDetail(c: ConnectionConfig): string {
+    if (isMySQLConnection(c)) {
+        return `${c.username}@${c.host}:${c.port}/${c.database}`;
+    }
+    return c.filePath;
+}
 
 let treeProvider: ConnectionTreeProvider | undefined;
 let extensionUri: vscode.Uri;
@@ -61,7 +75,7 @@ async function editConnectionCommand(manager: ConnectionManager, treeItem?: Conn
         }
 
         const selected = await vscode.window.showQuickPick(
-            connections.map(c => ({ label: c.name, description: `${c.type} - ${c.host}:${c.port}`, id: c.id })),
+            connections.map(c => ({ label: c.name, description: getConnectionDescription(c), id: c.id })),
             { placeHolder: 'Select connection to edit' }
         );
 
@@ -105,7 +119,7 @@ async function deleteConnectionCommand(manager: ConnectionManager, treeItem?: Co
         }
 
         const selected = await vscode.window.showQuickPick(
-            connections.map(c => ({ label: c.name, description: `${c.type} - ${c.host}:${c.port}`, id: c.id })),
+            connections.map(c => ({ label: c.name, description: getConnectionDescription(c), id: c.id })),
             { placeHolder: 'Select connection to delete' }
         );
 
@@ -146,7 +160,7 @@ async function listConnectionsCommand(manager: ConnectionManager): Promise<void>
     const items = connections.map(c => ({
         label: c.name,
         description: `${c.type}`,
-        detail: `${c.username}@${c.host}:${c.port}/${c.database}`,
+        detail: getConnectionDetail(c),
     }));
 
     await vscode.window.showQuickPick(items, {

@@ -1,6 +1,6 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import { ConnectionConfig, ConnectionConfigWithPassword, ConnectionId } from '../models/connection';
+import { ConnectionConfig, ConnectionConfigWithPassword, ConnectionId, isSQLiteConnection } from '../models/connection';
 import { ConnectionStorage } from './connection-storage';
 import { log } from '../logger';
 
@@ -68,6 +68,16 @@ export class ConnectionManager {
         }
 
         const id = this.generateDeterministicId(config.name);
+
+        // SQLite doesn't have password, handle separately
+        if (config.type === 'sqlite') {
+            const connection: ConnectionConfig = { id, ...config };
+            this.connections.set(id, connection);
+            await this.storage.saveConnections(Array.from(this.connections.values()));
+            return connection;
+        }
+
+        // MySQL and other password-based connections
         const { password, ...connectionWithoutPassword } = config;
         const connection: ConnectionConfig = { id, ...connectionWithoutPassword };
 
@@ -130,6 +140,11 @@ export class ConnectionManager {
             return undefined;
         }
 
+        // SQLite doesn't need password
+        if (isSQLiteConnection(connection)) {
+            return connection;
+        }
+
         const password = await this.storage.getPassword(id) || '';
         return { ...connection, password };
     }
@@ -151,6 +166,11 @@ export class ConnectionManager {
         const connection = this.connections.get(id);
         if (!connection) {
             return null;
+        }
+
+        // SQLite doesn't require password authentication
+        if (isSQLiteConnection(connection)) {
+            return operation(connection);
         }
 
         const existingPassword = await this.storage.getPassword(id);
@@ -179,12 +199,18 @@ export class ConnectionManager {
     /**
      * Prompts user to set password if missing. Returns true if password exists or was set.
      * Uses a mutex to prevent multiple concurrent password prompts for the same connection.
+     * SQLite connections always return true (no password needed).
      * @internal Prefer using withAuthenticatedConnection instead.
      */
     async ensurePassword(id: ConnectionId): Promise<boolean> {
         const connection = this.connections.get(id);
         if (!connection) {
             return false;
+        }
+
+        // SQLite doesn't need password
+        if (isSQLiteConnection(connection)) {
+            return true;
         }
 
         const existingPassword = await this.storage.getPassword(id);

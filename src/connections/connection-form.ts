@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
-import { ConnectionConfigWithPassword } from '../models/connection';
+import { MySQLConnectionConfigWithPassword, SQLiteConnectionConfigWithPassword } from '../models/connection';
 
-type FormData = Omit<ConnectionConfigWithPassword, 'id'>;
+type MySQLFormData = Omit<MySQLConnectionConfigWithPassword, 'id'>;
+type SQLiteFormData = Omit<SQLiteConnectionConfigWithPassword, 'id'>;
+type FormData = MySQLFormData | SQLiteFormData;
 
 interface FormMessage {
-    command: 'submit' | 'test' | 'cancel';
+    command: 'submit' | 'test' | 'cancel' | 'browseFile';
     data?: FormData;
 }
 
@@ -55,6 +57,9 @@ export class ConnectionFormPanel {
                     case 'cancel':
                         this.panel.dispose();
                         break;
+                    case 'browseFile':
+                        await this.handleBrowseFile();
+                        break;
                 }
             },
             null,
@@ -62,6 +67,26 @@ export class ConnectionFormPanel {
         );
 
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+    }
+
+    private async handleBrowseFile(): Promise<void> {
+        const fileUri = await vscode.window.showOpenDialog({
+            canSelectFiles: true,
+            canSelectFolders: false,
+            canSelectMany: false,
+            filters: {
+                'SQLite Databases': ['db', 'sqlite', 'sqlite3', 'db3'],
+                'All Files': ['*']
+            },
+            title: 'Select SQLite Database File'
+        });
+
+        if (fileUri && fileUri[0]) {
+            this.panel.webview.postMessage({
+                command: 'setFilePath',
+                filePath: fileUri[0].fsPath
+            });
+        }
     }
 
     static show(
@@ -105,6 +130,14 @@ export class ConnectionFormPanel {
     private getHtml(webview: vscode.Webview): string {
         const nonce = getNonce();
         const d = this.defaults || {};
+        const defaultType = 'type' in d ? d.type : 'mysql';
+        const defaultFilePath = 'filePath' in d ? (d as SQLiteFormData).filePath : '';
+        const defaultHost = 'host' in d ? (d as MySQLFormData).host : 'localhost';
+        const defaultPort = 'port' in d ? (d as MySQLFormData).port : 3306;
+        const defaultDatabase = 'database' in d ? (d as MySQLFormData).database : '';
+        const defaultUsername = 'username' in d ? (d as MySQLFormData).username : '';
+        const defaultPassword = 'password' in d ? (d as MySQLFormData).password : '';
+
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -161,6 +194,16 @@ export class ConnectionFormPanel {
         .row .form-group.small {
             flex: 0 0 100px;
         }
+        .input-with-button {
+            display: flex;
+            gap: 8px;
+        }
+        .input-with-button input {
+            flex: 1;
+        }
+        .input-with-button button {
+            flex-shrink: 0;
+        }
         .buttons {
             display: flex;
             gap: 10px;
@@ -214,6 +257,9 @@ export class ConnectionFormPanel {
             content: ' *';
             color: var(--vscode-errorForeground);
         }
+        .hidden {
+            display: none !important;
+        }
     </style>
 </head>
 <body>
@@ -229,35 +275,50 @@ export class ConnectionFormPanel {
 
         <div class="form-group">
             <label for="type">Database Type</label>
-            <select id="type" name="type" disabled>
-                <option value="mysql" selected>MySQL</option>
+            <select id="type" name="type">
+                <option value="mysql" ${defaultType === 'mysql' ? 'selected' : ''}>MySQL</option>
+                <option value="sqlite" ${defaultType === 'sqlite' ? 'selected' : ''}>SQLite</option>
             </select>
         </div>
 
-        <div class="row">
+        <!-- SQLite fields -->
+        <div id="sqliteFields" class="${defaultType === 'sqlite' ? '' : 'hidden'}">
             <div class="form-group">
-                <label for="host" class="required">Host</label>
-                <input type="text" id="host" name="host" value="${d.host || 'localhost'}" required placeholder="localhost">
-            </div>
-            <div class="form-group small">
-                <label for="port" class="required">Port</label>
-                <input type="number" id="port" name="port" value="${d.port || 3306}" required min="1" max="65535">
+                <label for="filePath" class="required">Database File</label>
+                <div class="input-with-button">
+                    <input type="text" id="filePath" name="filePath" value="${defaultFilePath}" placeholder="/path/to/database.sqlite" required>
+                    <button type="button" class="secondary" id="browseBtn">Browse...</button>
+                </div>
             </div>
         </div>
 
-        <div class="form-group">
-            <label for="database" class="required">Database Name</label>
-            <input type="text" id="database" name="database" value="${d.database || ''}" required placeholder="mydb">
-        </div>
-
-        <div class="row">
-            <div class="form-group">
-                <label for="username" class="required">Username</label>
-                <input type="text" id="username" name="username" value="${d.username || ''}" required placeholder="root">
+        <!-- MySQL fields -->
+        <div id="mysqlFields" class="${defaultType === 'mysql' ? '' : 'hidden'}">
+            <div class="row">
+                <div class="form-group">
+                    <label for="host" class="required">Host</label>
+                    <input type="text" id="host" name="host" value="${defaultHost}" placeholder="localhost">
+                </div>
+                <div class="form-group small">
+                    <label for="port" class="required">Port</label>
+                    <input type="number" id="port" name="port" value="${defaultPort}" min="1" max="65535">
+                </div>
             </div>
+
             <div class="form-group">
-                <label for="password">Password</label>
-                <input type="password" id="password" name="password" value="${d.password || ''}" placeholder="••••••••">
+                <label for="database" class="required">Database Name</label>
+                <input type="text" id="database" name="database" value="${defaultDatabase}" placeholder="mydb">
+            </div>
+
+            <div class="row">
+                <div class="form-group">
+                    <label for="username" class="required">Username</label>
+                    <input type="text" id="username" name="username" value="${defaultUsername}" placeholder="root">
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" value="${defaultPassword}" placeholder="••••••••">
+                </div>
             </div>
         </div>
 
@@ -274,11 +335,50 @@ export class ConnectionFormPanel {
         const messageDiv = document.getElementById('message');
         const testBtn = document.getElementById('testBtn');
         const cancelBtn = document.getElementById('cancelBtn');
+        const browseBtn = document.getElementById('browseBtn');
+        const typeSelect = document.getElementById('type');
+        const mysqlFields = document.getElementById('mysqlFields');
+        const sqliteFields = document.getElementById('sqliteFields');
+
+        function updateFieldVisibility() {
+            const type = typeSelect.value;
+            if (type === 'sqlite') {
+                mysqlFields.classList.add('hidden');
+                sqliteFields.classList.remove('hidden');
+                // Update required attributes
+                document.getElementById('filePath').required = true;
+                document.getElementById('host').required = false;
+                document.getElementById('port').required = false;
+                document.getElementById('database').required = false;
+                document.getElementById('username').required = false;
+            } else {
+                mysqlFields.classList.remove('hidden');
+                sqliteFields.classList.add('hidden');
+                // Update required attributes
+                document.getElementById('filePath').required = false;
+                document.getElementById('host').required = true;
+                document.getElementById('port').required = true;
+                document.getElementById('database').required = true;
+                document.getElementById('username').required = true;
+            }
+        }
+
+        typeSelect.addEventListener('change', updateFieldVisibility);
 
         function getFormData() {
+            const type = typeSelect.value;
+
+            if (type === 'sqlite') {
+                return {
+                    name: document.getElementById('name').value.trim(),
+                    type: 'sqlite',
+                    filePath: document.getElementById('filePath').value.trim(),
+                };
+            }
+
             return {
                 name: document.getElementById('name').value.trim(),
-                type: document.getElementById('type').value,
+                type: 'mysql',
                 host: document.getElementById('host').value.trim(),
                 port: parseInt(document.getElementById('port').value, 10),
                 database: document.getElementById('database').value.trim(),
@@ -306,6 +406,10 @@ export class ConnectionFormPanel {
             vscode.postMessage({ command: 'cancel' });
         });
 
+        browseBtn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'browseFile' });
+        });
+
         window.addEventListener('message', (event) => {
             const message = event.data;
             switch (message.command) {
@@ -315,8 +419,14 @@ export class ConnectionFormPanel {
                 case 'error':
                     showMessage(message.message, 'error');
                     break;
+                case 'setFilePath':
+                    document.getElementById('filePath').value = message.filePath;
+                    break;
             }
         });
+
+        // Initialize field visibility
+        updateFieldVisibility();
     </script>
 </body>
 </html>`;

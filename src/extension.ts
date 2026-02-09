@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ConnectionStorage } from './connections/connection-storage';
 import { ConnectionManager } from './connections/connection-manager';
-import { ConnectionPool } from './connections/connection-pool';
+import { ConnectionPool, setSqlJsWasmPath } from './connections/connection-pool';
 import { registerConnectionCommands, setTreeProvider, setExtensionUri } from './connections/connection-commands';
 import { registerTreeView } from './connections/connection-tree-provider';
 import { ScriptStorage } from './scripts/script-storage';
@@ -25,6 +25,9 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(outputChannel);
 
     log('dbooly extension activated');
+
+    // Initialize sql.js WASM path for SQLite support
+    setSqlJsWasmPath(context.extensionPath);
 
     const storage = new ConnectionStorage(context.secrets);
     connectionManager = new ConnectionManager(storage);

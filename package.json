@@ -340,22 +340,32 @@
     "package": "vsce package",
     "publish": "./scripts/publish.sh",
     "publish:patch": "./scripts/publish.sh --patch",
-    "publish:minor": "./scripts/publish.sh --minor"
+    "publish:minor": "./scripts/publish.sh --minor",
+    "prepare": "husky"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "@types/sql.js": "^1.4.9",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.19.0",
     "@typescript-eslint/parser": "^6.19.0",
     "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.20.0",
     "eslint": "^8.56.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
     "typescript": "^5.3.0"
   },
   "dependencies": {
     "mysql2": "^3.16.3",
     "sql-formatter": "^15.7.0",
     "sql-language-server": "^1.7.1",
+    "sql.js": "^1.13.0",
     "vscode-languageclient": "^9.0.1"
+  },
+  "lint-staged": {
+    "src/**/*.ts": [
+      "eslint --fix"
+    ]
   }
 }

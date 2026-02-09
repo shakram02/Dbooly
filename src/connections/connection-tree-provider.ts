@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from './connection-manager';
 import { ConnectionPool } from './connection-pool';
-import { ConnectionConfig, ConnectionId } from '../models/connection';
+import { ConnectionConfig, ConnectionId, isMySQLConnection } from '../models/connection';
 import { TableInfo } from '../models/table';
 import { ColumnInfo } from '../models/column';
 import { getSchemaProvider, SortOptions } from '../providers/schema-provider';
@@ -148,7 +148,12 @@ export class ConnectionTreeItem extends vscode.TreeItem {
     ) {
         super(connection.name, vscode.TreeItemCollapsibleState.Collapsed);
 
-        this.tooltip = `${connection.username}@${connection.host}:${connection.port}/${connection.database}${isActive ? ' (Active)' : ''}`;
+        // Type-specific tooltip
+        if (isMySQLConnection(connection)) {
+            this.tooltip = `${connection.username}@${connection.host}:${connection.port}/${connection.database}${isActive ? ' (Active)' : ''}`;
+        } else {
+            this.tooltip = `${connection.filePath}${isActive ? ' (Active)' : ''}`;
+        }
         this.description = connection.type;
 
         // Context value includes active state for context menu filtering

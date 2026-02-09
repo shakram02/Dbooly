@@ -3,6 +3,7 @@ import { TableInfo } from '../models/table';
 import { ColumnInfo } from '../models/column';
 import { ConnectionPool } from '../connections/connection-pool';
 import { MySQLSchemaProvider } from './mysql-schema-provider';
+import { SQLiteSchemaProvider } from './sqlite-schema-provider';
 
 export interface QueryResult {
     columns: string[];
@@ -59,6 +60,7 @@ export interface SchemaProvider {
 
 const providers: Record<DatabaseType, SchemaProvider> = {
     mysql: new MySQLSchemaProvider(),
+    sqlite: new SQLiteSchemaProvider(),
 };
 
 export function getSchemaProvider(type: DatabaseType): SchemaProvider {

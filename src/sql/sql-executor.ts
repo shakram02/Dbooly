@@ -1,9 +1,17 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../connections/connection-manager';
 import { ConnectionPool } from '../connections/connection-pool';
+import { ConnectionConfig, isMySQLConnection } from '../models/connection';
 import { getSchemaProvider, QueryExecutionResult } from '../providers/schema-provider';
 import { splitSqlStatements, findStatementAtLine } from './sql-statement-splitter';
 import { log, logError } from '../logger';
+
+function getConnectionDisplayString(conn: ConnectionConfig): string {
+    if (isMySQLConnection(conn)) {
+        return `${conn.type} · ${conn.host}:${conn.port}/${conn.database}`;
+    }
+    return `${conn.type} · ${conn.filePath}`;
+}
 
 export type DestructiveOpType = 'delete-no-where' | 'drop' | 'truncate';
 
@@ -183,7 +191,7 @@ export class SqlExecutor {
 
         const items = connections.map(conn => ({
             label: conn.name,
-            description: `${conn.type} · ${conn.host}:${conn.port}/${conn.database}`,
+            description: getConnectionDisplayString(conn),
             connectionId: conn.id,
         }));
 
