@@ -3,11 +3,12 @@ import {
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
+    State,
     TransportKind
 } from 'vscode-languageclient/node';
 import { ConnectionManager } from '../connections/connection-manager';
 import { ConnectionPool } from '../connections/connection-pool';
-import { ConnectionId } from '../models/connection';
+import { ConnectionId, isMySQLConnection, isSQLiteConnection } from '../models/connection';
 import { SchemaCache } from './schema-cache';
 import { splitSqlStatements, findStatementAtLine, SqlStatement } from '../sql/sql-statement-splitter';
 import { log, logError } from '../logger';
@@ -30,6 +31,10 @@ export class SqlLanguageServerClient implements vscode.Disposable {
     private currentConnectionId: ConnectionId | null = null;
     private schemaCache: SchemaCache;
     private lastStatementIndex: number = -1;
+    // Mutex to serialize start/stop operations
+    private operationInProgress: Promise<void> | null = null;
+    // Monotonic counter to detect stale operations
+    private operationGeneration: number = 0;
 
     constructor(
         private readonly connectionManager: ConnectionManager,
@@ -106,12 +111,33 @@ export class SqlLanguageServerClient implements vscode.Disposable {
     /**
      * Handles connection activation/deactivation.
      * Restarts server when connection changes.
+     * Uses generation counter to cancel stale operations.
      */
     private async onConnectionChange(connectionId: ConnectionId | null): Promise<void> {
+        // Increment generation to invalidate any in-flight operations
+        const generation = ++this.operationGeneration;
+
+        // Wait for any pending operation to complete
+        if (this.operationInProgress) {
+            await this.operationInProgress;
+        }
+
+        // Start new operation
+        this.operationInProgress = this.doConnectionChange(connectionId, generation);
+        await this.operationInProgress;
+        this.operationInProgress = null;
+    }
+
+    private async doConnectionChange(connectionId: ConnectionId | null, generation: number): Promise<void> {
         if (connectionId) {
             // Connection activated or changed - restart server with new config
             await this.stop();
-            await this.startWithCachedSchema(connectionId);
+            // Check if operation is still valid
+            if (generation !== this.operationGeneration) {
+                log('SQL Language Server: Connection change cancelled (newer operation pending)');
+                return;
+            }
+            await this.startWithCachedSchema(connectionId, generation);
         } else {
             // No active connection - stop server
             await this.stop();
@@ -120,8 +146,9 @@ export class SqlLanguageServerClient implements vscode.Disposable {
 
     /**
      * Starts the LSP using cached schema if available, otherwise fetches first.
+     * @param generation - Operation generation for cancellation detection
      */
-    private async startWithCachedSchema(connectionId: ConnectionId): Promise<void> {
+    private async startWithCachedSchema(connectionId: ConnectionId, generation: number): Promise<void> {
         // Use silent mode - don't prompt for password, just skip if not available
         await this.connectionManager.withAuthenticatedConnection(
             connectionId,
@@ -136,7 +163,8 @@ export class SqlLanguageServerClient implements vscode.Disposable {
                     await this.startWithJsonAdapter(connectionId, schemaPath);
 
                     // Refresh schema in background, restart LSP when done
-                    this.refreshAndRestart(connectionId, config);
+                    // Pass generation to allow cancellation
+                    this.refreshAndRestart(connectionId, config, generation);
                 } else {
                     // No cache - must fetch schema first (blocking)
                     log(`SQL Language Server: No cached schema, fetching...`);
@@ -147,6 +175,11 @@ export class SqlLanguageServerClient implements vscode.Disposable {
                             config,
                             this.connectionPool
                         );
+                        // Check if operation is still valid before starting
+                        if (generation !== this.operationGeneration) {
+                            log('SQL Language Server: Start cancelled (newer operation pending)');
+                            return;
+                        }
                         await this.startWithJsonAdapter(connectionId, schemaPath);
                     } catch (error) {
                         logError('SQL Language Server: Failed to fetch schema', error);
@@ -161,10 +194,12 @@ export class SqlLanguageServerClient implements vscode.Disposable {
 
     /**
      * Refreshes schema in background and restarts LSP when complete.
+     * @param generation - Operation generation for cancellation detection
      */
     private async refreshAndRestart(
         connectionId: ConnectionId,
-        config: Awaited<ReturnType<typeof this.connectionManager.getConnectionWithPassword>>
+        config: Awaited<ReturnType<typeof this.connectionManager.getConnectionWithPassword>>,
+        generation: number
     ): Promise<void> {
         if (!config) return;
 
@@ -175,11 +210,18 @@ export class SqlLanguageServerClient implements vscode.Disposable {
                 this.connectionPool
             );
 
-            // Only restart if this is still the active connection
-            if (this.currentConnectionId === connectionId) {
+            // Only restart if this is still the active connection AND operation is still valid
+            if (this.currentConnectionId === connectionId && generation === this.operationGeneration) {
                 log('SQL Language Server: Restarting with refreshed schema');
                 await this.stop();
+                // Double-check after stop (another connection change may have occurred)
+                if (generation !== this.operationGeneration) {
+                    log('SQL Language Server: Restart cancelled (newer operation pending)');
+                    return;
+                }
                 await this.startWithJsonAdapter(connectionId, newSchemaPath);
+            } else {
+                log('SQL Language Server: Background refresh completed but connection changed, skipping restart');
             }
         } catch (error) {
             logError('SQL Language Server: Background refresh failed', error);
@@ -272,28 +314,23 @@ export class SqlLanguageServerClient implements vscode.Disposable {
         };
 
         // Database adapter config - connects to live database
-        const adapterMap: Record<string, string> = {
-            'mysql': 'mysql',
-            'postgres': 'postgres',
-            'postgresql': 'postgres',
-            'sqlite': 'sqlite3',
-            'sqlite3': 'sqlite3'
-        };
-        const adapter = adapterMap[config.type] || config.type;
+        // Use type guards for proper type narrowing
+        let dbConfig: { connections: Record<string, unknown>[] };
 
-        const dbConfig = adapter === 'sqlite3'
-            ? {
+        if (isSQLiteConnection(config)) {
+            dbConfig = {
                 connections: [{
                     name: config.name,
                     adapter: 'sqlite3',
-                    filename: config.database,
-                    database: config.database
+                    filename: config.filePath,
+                    database: config.filePath
                 }]
-            }
-            : {
+            };
+        } else if (isMySQLConnection(config)) {
+            dbConfig = {
                 connections: [{
                     name: config.name,
-                    adapter,
+                    adapter: 'mysql',
                     host: config.host,
                     port: config.port,
                     user: config.username,
@@ -301,6 +338,11 @@ export class SqlLanguageServerClient implements vscode.Disposable {
                     database: config.database
                 }]
             };
+        } else {
+            // This branch should never be reached due to exhaustive type checking
+            logError(`SQL Language Server: Unsupported database type`);
+            return;
+        }
 
         const clientOptions = this.buildClientOptions(dbConfig);
 
@@ -316,7 +358,7 @@ export class SqlLanguageServerClient implements vscode.Disposable {
 
         try {
             await this.client.start();
-            log(`SQL Language Server: Started with ${adapter} adapter`);
+            log(`SQL Language Server: Started with ${config.type} adapter`);
 
             // Send full configuration (including lint rules) to trigger server setup
             this.client.sendNotification('workspace/didChangeConfiguration', {
@@ -568,13 +610,33 @@ export class SqlLanguageServerClient implements vscode.Disposable {
 
     /**
      * Stops the SQL language server.
+     * Handles race conditions when client is still starting.
      */
     private async stop(): Promise<void> {
         if (this.client) {
             try {
-                await this.client.stop();
+                if (this.client.state === State.Starting) {
+                    // Client is starting - wait for it to become running or stopped
+                    log('SQL Language Server: Waiting for client to finish starting before stopping');
+                    await new Promise<void>((resolve) => {
+                        const disposable = this.client!.onDidChangeState((e) => {
+                            if (e.newState !== State.Starting) {
+                                disposable.dispose();
+                                resolve();
+                            }
+                        });
+                    });
+                }
+                // Only stop if it's running
+                if (this.client.state === State.Running) {
+                    await this.client.stop();
+                }
             } catch (error) {
-                logError('SQL Language Server: Error stopping', error);
+                // Ignore "not running" errors - client may have already stopped
+                const msg = error instanceof Error ? error.message : String(error);
+                if (!msg.includes('not running')) {
+                    logError('SQL Language Server: Error stopping', error);
+                }
             }
             this.client = null;
             log('SQL Language Server: Stopped');
@@ -594,7 +656,8 @@ export class SqlLanguageServerClient implements vscode.Disposable {
         if (!config) return;
 
         log('SQL Language Server: Manual schema refresh requested');
-        await this.refreshAndRestart(this.currentConnectionId, config);
+        // Use current generation - manual refresh should complete even if connection changes
+        await this.refreshAndRestart(this.currentConnectionId, config, this.operationGeneration);
     }
 
     dispose(): void {

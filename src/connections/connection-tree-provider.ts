@@ -195,6 +195,8 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
     private tableCache: Map<ConnectionId, TableInfo[]> = new Map();
     private columnCache = new LRUCache<string, ColumnInfo[]>(100, 10 * 60 * 1000); // 100 tables, 10 min TTL
     private disposables: vscode.Disposable[] = [];
+    // Track connections that are currently loading tables
+    private loadingConnections: Set<ConnectionId> = new Set();
 
     constructor(
         private readonly connectionManager: ConnectionManager,
@@ -257,11 +259,35 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
         return [];
     }
 
-    private async getTablesForConnection(connection: ConnectionConfig): Promise<TableTreeItem[]> {
-        const tables = await this.fetchTablesForConnection(connection.id);
-        const starredSet = this.connectionManager.getStorage().getStarredTables(connection.id);
-        const sorted = sortTablesStarredFirst(tables, starredSet);
-        return sorted.map(t => new TableTreeItem(t, starredSet.has(t.name)));
+    private getTablesForConnection(connection: ConnectionConfig): TreeItem[] {
+        // Check if we have cached data
+        const cached = this.tableCache.get(connection.id);
+        if (cached) {
+            const starredSet = this.connectionManager.getStorage().getStarredTables(connection.id);
+            const sorted = sortTablesStarredFirst(cached, starredSet);
+            return sorted.map(t => new TableTreeItem(t, starredSet.has(t.name)));
+        }
+
+        // Check if already loading
+        if (this.loadingConnections.has(connection.id)) {
+            return [new LoadingTreeItem()];
+        }
+
+        // Start loading in background
+        this.loadingConnections.add(connection.id);
+        this.fetchTablesInBackground(connection.id);
+
+        return [new LoadingTreeItem()];
+    }
+
+    private async fetchTablesInBackground(connectionId: ConnectionId): Promise<void> {
+        try {
+            await this.fetchTablesForConnection(connectionId);
+        } finally {
+            this.loadingConnections.delete(connectionId);
+            // Refresh the tree to show the loaded tables
+            this._onDidChangeTreeData.fire();
+        }
     }
 
     private async getColumnsForTable(table: TableInfo): Promise<TreeItem[]> {
@@ -307,8 +333,8 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
     async fetchTablesForConnection(connectionId: ConnectionId): Promise<TableInfo[]> {
         const cached = this.tableCache.get(connectionId);
         if (cached) {
-            // Even with cached data, activate the connection when expanding
-            this.connectionManager.setActiveConnection(connectionId);
+            // Don't change active connection when returning cached data
+            // This prevents loops when tree re-renders for styling changes
             return cached;
         }
 
@@ -333,11 +359,9 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
 
             this.tableCache.set(connectionId, tables);
 
-            // Auto-activate connection on successful expansion
+            // Auto-activate connection on successful FIRST expansion (not cached)
+            // setActiveConnection is a no-op if already active
             this.connectionManager.setActiveConnection(connectionId);
-
-            // Refresh tree to update context value (enables search button)
-            this._onDidChangeTreeData.fire();
 
             return tables;
         } catch (error) {
