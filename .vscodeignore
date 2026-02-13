@@ -18,3 +18,5 @@ AGENTS.md
 scripts/**
 secrets.local
 *.local
+.env
+.env.example
