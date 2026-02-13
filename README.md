@@ -26,9 +26,16 @@ A lightweight database viewer and SQL query tool for VS Code. Connect to MySQL d
 - View results in an interactive data grid
 - Cancel long-running queries with `Escape`
 
+## Install
+
+Available on both marketplaces:
+
+- [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=shakram02.dbooly)
+- [Open VSX Registry](https://open-vsx.org/extension/shakram02/dbooly) (Cursor, Windsurf, etc.)
+
 ## Requirements
 
-- VS Code 1.85.0 or higher
+- VS Code 1.70.0+, Cursor, or any VS Code-compatible editor
 - MySQL 5.7+ or MariaDB 10.2+
 
 ## Usage
