@@ -1,7 +1,14 @@
 import * as vscode from 'vscode';
-import { ConnectionConfig } from '../models/connection';
+import { ConnectionConfig, isMySQLConnection } from '../models/connection';
 import { TableInfo } from '../models/table';
 import { QueryResult, SortOptions, SortDirection, QueryExecutionResult } from '../providers/schema-provider';
+
+function getConnectionSubtitle(connection: ConnectionConfig): string {
+    if (isMySQLConnection(connection)) {
+        return `${connection.name} - ${connection.host}:${connection.port}/${connection.database}`;
+    }
+    return `${connection.name} - ${connection.filePath}`;
+}
 
 function getNonce(): string {
     let text = '';
@@ -83,7 +90,7 @@ export class TableDataPanel {
 
         const config: PanelConfig = {
             title: table.name,
-            subtitle: `${connection.name} - ${connection.host}:${connection.port}/${connection.database}`,
+            subtitle: getConnectionSubtitle(connection),
             mode: 'table',
         };
 
@@ -190,7 +197,7 @@ export class TableDataPanel {
     ): void {
         this.config = {
             title: table.name,
-            subtitle: `${connection.name} - ${connection.host}:${connection.port}/${connection.database}`,
+            subtitle: getConnectionSubtitle(connection),
             mode: 'table',
         };
         this.getData = getData;
