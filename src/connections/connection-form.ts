@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
-import { MySQLConnectionConfigWithPassword, SQLiteConnectionConfigWithPassword } from '../models/connection';
+import { ConnectionScope, MySQLConnectionConfigWithPassword, SQLiteConnectionConfigWithPassword, PostgreSQLConnectionConfigWithPassword } from '../models/connection';
 
 type MySQLFormData = Omit<MySQLConnectionConfigWithPassword, 'id'>;
 type SQLiteFormData = Omit<SQLiteConnectionConfigWithPassword, 'id'>;
-type FormData = MySQLFormData | SQLiteFormData;
+type PostgreSQLFormData = Omit<PostgreSQLConnectionConfigWithPassword, 'id'>;
+type FormData = MySQLFormData | SQLiteFormData | PostgreSQLFormData;
 
 interface FormMessage {
     command: 'submit' | 'test' | 'cancel' | 'browseFile';
@@ -28,6 +29,7 @@ export class ConnectionFormPanel {
         panel: vscode.WebviewPanel,
         private readonly defaults: Partial<FormData> | undefined,
         private readonly title: string,
+        private readonly hasProjectOpen: boolean,
         private readonly onSubmit: (data: FormData) => Promise<void>,
         private readonly onTest: (data: FormData) => Promise<{ success: boolean; message: string }>
     ) {
@@ -93,6 +95,7 @@ export class ConnectionFormPanel {
         extensionUri: vscode.Uri,
         defaults: Partial<FormData> | undefined,
         title: string,
+        hasProjectOpen: boolean,
         onSubmit: (data: FormData) => Promise<void>,
         onTest: (data: FormData) => Promise<{ success: boolean; message: string }>
     ): void {
@@ -113,7 +116,7 @@ export class ConnectionFormPanel {
             }
         );
 
-        ConnectionFormPanel.currentPanel = new ConnectionFormPanel(panel, defaults, title, onSubmit, onTest);
+        ConnectionFormPanel.currentPanel = new ConnectionFormPanel(panel, defaults, title, hasProjectOpen, onSubmit, onTest);
     }
 
     private dispose(): void {
@@ -133,10 +136,13 @@ export class ConnectionFormPanel {
         const defaultType = 'type' in d ? d.type : 'mysql';
         const defaultFilePath = 'filePath' in d ? (d as SQLiteFormData).filePath : '';
         const defaultHost = 'host' in d ? (d as MySQLFormData).host : 'localhost';
-        const defaultPort = 'port' in d ? (d as MySQLFormData).port : 3306;
+        const defaultPort = 'port' in d ? (d as MySQLFormData).port : (defaultType === 'postgresql' ? 5432 : 3306);
         const defaultDatabase = 'database' in d ? (d as MySQLFormData).database : '';
         const defaultUsername = 'username' in d ? (d as MySQLFormData).username : '';
         const defaultPassword = 'password' in d ? (d as MySQLFormData).password : '';
+        const defaultSsl = 'ssl' in d ? (d as PostgreSQLFormData).ssl : false;
+        const defaultScope: ConnectionScope = 'scope' in d ? (d as { scope: ConnectionScope }).scope : 'global';
+        const projectDisabled = !this.hasProjectOpen;
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -260,6 +266,30 @@ export class ConnectionFormPanel {
         .hidden {
             display: none !important;
         }
+        .radio-group {
+            display: flex;
+            gap: 16px;
+        }
+        .radio-group label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: normal;
+            cursor: pointer;
+        }
+        .radio-group label.disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .radio-group input[type="radio"] {
+            width: auto;
+            margin: 0;
+        }
+        .scope-note {
+            font-size: 12px;
+            color: var(--vscode-descriptionForeground);
+            margin-top: 4px;
+        }
     </style>
 </head>
 <body>
@@ -274,9 +304,25 @@ export class ConnectionFormPanel {
         </div>
 
         <div class="form-group">
+            <label>Connection Scope</label>
+            <div class="radio-group">
+                <label${defaultScope === 'global' ? '' : ''}>
+                    <input type="radio" name="scope" value="global" ${defaultScope === 'global' ? 'checked' : ''}>
+                    Global
+                </label>
+                <label${projectDisabled ? ' class="disabled"' : ''}>
+                    <input type="radio" name="scope" value="project" ${defaultScope === 'project' ? 'checked' : ''} ${projectDisabled ? 'disabled' : ''}>
+                    Project
+                </label>
+            </div>
+            ${projectDisabled ? '<div class="scope-note">Project connections require an open project</div>' : ''}
+        </div>
+
+        <div class="form-group">
             <label for="type">Database Type</label>
             <select id="type" name="type">
                 <option value="mysql" ${defaultType === 'mysql' ? 'selected' : ''}>MySQL</option>
+                <option value="postgresql" ${defaultType === 'postgresql' ? 'selected' : ''}>PostgreSQL</option>
                 <option value="sqlite" ${defaultType === 'sqlite' ? 'selected' : ''}>SQLite</option>
             </select>
         </div>
@@ -292,8 +338,8 @@ export class ConnectionFormPanel {
             </div>
         </div>
 
-        <!-- MySQL fields -->
-        <div id="mysqlFields" class="${defaultType === 'mysql' ? '' : 'hidden'}">
+        <!-- Server fields (MySQL / PostgreSQL) -->
+        <div id="serverFields" class="${defaultType !== 'sqlite' ? '' : 'hidden'}">
             <div class="row">
                 <div class="form-group">
                     <label for="host" class="required">Host</label>
@@ -320,6 +366,16 @@ export class ConnectionFormPanel {
                     <input type="password" id="password" name="password" value="${defaultPassword}" placeholder="••••••••">
                 </div>
             </div>
+
+            <!-- SSL toggle (PostgreSQL only) -->
+            <div id="sslField" class="${defaultType === 'postgresql' ? '' : 'hidden'}">
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="ssl" name="ssl" ${defaultSsl ? 'checked' : ''}>
+                        Use SSL
+                    </label>
+                </div>
+            </div>
         </div>
 
         <div class="buttons">
@@ -337,14 +393,17 @@ export class ConnectionFormPanel {
         const cancelBtn = document.getElementById('cancelBtn');
         const browseBtn = document.getElementById('browseBtn');
         const typeSelect = document.getElementById('type');
-        const mysqlFields = document.getElementById('mysqlFields');
+        const serverFields = document.getElementById('serverFields');
         const sqliteFields = document.getElementById('sqliteFields');
+        const sslField = document.getElementById('sslField');
+        const portDefaults = { mysql: 3306, postgresql: 5432 };
 
         function updateFieldVisibility() {
             const type = typeSelect.value;
             if (type === 'sqlite') {
-                mysqlFields.classList.add('hidden');
+                serverFields.classList.add('hidden');
                 sqliteFields.classList.remove('hidden');
+                sslField.classList.add('hidden');
                 // Update required attributes
                 document.getElementById('filePath').required = true;
                 document.getElementById('host').required = false;
@@ -352,7 +411,7 @@ export class ConnectionFormPanel {
                 document.getElementById('database').required = false;
                 document.getElementById('username').required = false;
             } else {
-                mysqlFields.classList.remove('hidden');
+                serverFields.classList.remove('hidden');
                 sqliteFields.classList.add('hidden');
                 // Update required attributes
                 document.getElementById('filePath').required = false;
@@ -360,25 +419,60 @@ export class ConnectionFormPanel {
                 document.getElementById('port').required = true;
                 document.getElementById('database').required = true;
                 document.getElementById('username').required = true;
+                // Show SSL toggle only for PostgreSQL
+                if (type === 'postgresql') {
+                    sslField.classList.remove('hidden');
+                } else {
+                    sslField.classList.add('hidden');
+                }
             }
         }
 
-        typeSelect.addEventListener('change', updateFieldVisibility);
+        typeSelect.addEventListener('change', function() {
+            const newType = typeSelect.value;
+            // Update default port when switching between server types
+            if (portDefaults[newType]) {
+                const portInput = document.getElementById('port');
+                const currentPort = parseInt(portInput.value, 10);
+                // Only change port if it matches the other type's default
+                if (Object.values(portDefaults).includes(currentPort) || isNaN(currentPort)) {
+                    portInput.value = portDefaults[newType];
+                }
+            }
+            updateFieldVisibility();
+        });
 
         function getFormData() {
             const type = typeSelect.value;
+            const scope = document.querySelector('input[name="scope"]:checked').value;
 
             if (type === 'sqlite') {
                 return {
                     name: document.getElementById('name').value.trim(),
                     type: 'sqlite',
+                    scope: scope,
                     filePath: document.getElementById('filePath').value.trim(),
+                };
+            }
+
+            if (type === 'postgresql') {
+                return {
+                    name: document.getElementById('name').value.trim(),
+                    type: 'postgresql',
+                    scope: scope,
+                    host: document.getElementById('host').value.trim(),
+                    port: parseInt(document.getElementById('port').value, 10),
+                    database: document.getElementById('database').value.trim(),
+                    username: document.getElementById('username').value.trim(),
+                    password: document.getElementById('password').value,
+                    ssl: document.getElementById('ssl').checked,
                 };
             }
 
             return {
                 name: document.getElementById('name').value.trim(),
                 type: 'mysql',
+                scope: scope,
                 host: document.getElementById('host').value.trim(),
                 port: parseInt(document.getElementById('port').value, 10),
                 database: document.getElementById('database').value.trim(),

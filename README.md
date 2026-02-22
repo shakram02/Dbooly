@@ -1,10 +1,11 @@
 # dbooly
 
-A lightweight database viewer and SQL query tool for VS Code. Connect to MySQL databases, browse schemas, execute queries, and get intelligent SQL completions.
+A lightweight database viewer and SQL query tool for VS Code. Connect to MySQL and SQLite databases, browse schemas, execute queries, and get intelligent SQL completions.
 
 ## Features
 
 ### Connection Management
+- **MySQL** and **SQLite** support
 - Add, edit, and delete database connections
 - Securely store credentials using VS Code's secret storage
 - Quick-switch between multiple connections
@@ -22,6 +23,10 @@ A lightweight database viewer and SQL query tool for VS Code. Connect to MySQL d
 - View table data with a single click
 - Search tables across your database
 
+### Script Manager
+- Save and organize SQL scripts in the sidebar
+- Create folders to group related scripts
+
 ### Query Results
 - View results in an interactive data grid
 - Cancel long-running queries with `Escape`
@@ -36,14 +41,18 @@ Available on both marketplaces:
 ## Requirements
 
 - VS Code 1.70.0+, Cursor, or any VS Code-compatible editor
-- MySQL 5.7+ or MariaDB 10.2+
+
+### Supported Databases
+- MySQL 5.7+ / MariaDB 10.2+
+- SQLite 3
 
 ## Usage
 
 1. Open the **dbooly** sidebar (database icon in the activity bar)
-2. Click **Add Connection** and enter your database credentials
-3. Open any `.sql` file
-4. Press `Ctrl+Enter` to execute the statement at your cursor
+2. Click **Add Connection** and select your database type
+3. For MySQL, enter your host, port, and credentials
+4. For SQLite, browse to your `.db` / `.sqlite` file
+5. Open any `.sql` file and press `Ctrl+Enter` to execute
 
 ## Extension Settings
 
@@ -56,10 +65,6 @@ This extension works out of the box with no configuration required.
 | Execute SQL | `Ctrl+Enter` / `Cmd+Enter` |
 | Cancel Query | `Escape` |
 | Format SQL | `Shift+Alt+F` (default formatter) |
-
-## Known Issues
-
-- Currently supports MySQL/MariaDB only. PostgreSQL and SQLite support planned.
 
 ## Release Notes
 

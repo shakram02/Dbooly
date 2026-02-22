@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from './connection-manager';
 import { testConnection } from './connection-tester';
-import { ConnectionConfig, ConnectionId, isMySQLConnection } from '../models/connection';
+import { ConnectionConfig, ConnectionId, ConnectionScope, isMySQLConnection, isPostgreSQLConnection } from '../models/connection';
 import { ConnectionTreeItem, ConnectionTreeProvider } from './connection-tree-provider';
 import { ConnectionFormPanel } from './connection-form';
 
@@ -9,11 +9,17 @@ function getConnectionDescription(c: ConnectionConfig): string {
     if (isMySQLConnection(c)) {
         return `${c.type} - ${c.host}:${c.port}`;
     }
+    if (isPostgreSQLConnection(c)) {
+        return `${c.type} - ${c.host}:${c.port}`;
+    }
     return `${c.type} - ${c.filePath}`;
 }
 
 function getConnectionDetail(c: ConnectionConfig): string {
     if (isMySQLConnection(c)) {
+        return `${c.username}@${c.host}:${c.port}/${c.database}`;
+    }
+    if (isPostgreSQLConnection(c)) {
         return `${c.username}@${c.host}:${c.port}/${c.database}`;
     }
     return c.filePath;
@@ -42,7 +48,9 @@ export function registerConnectionCommands(
         vscode.commands.registerCommand('dbooly.addConnection', () => addConnectionCommand(connectionManager)),
         vscode.commands.registerCommand('dbooly.editConnection', (item?: ConnectionTreeItem) => editConnectionCommand(connectionManager, item)),
         vscode.commands.registerCommand('dbooly.deleteConnection', (item?: ConnectionTreeItem) => deleteConnectionCommand(connectionManager, item)),
-        vscode.commands.registerCommand('dbooly.listConnections', () => listConnectionsCommand(connectionManager))
+        vscode.commands.registerCommand('dbooly.listConnections', () => listConnectionsCommand(connectionManager)),
+        vscode.commands.registerCommand('dbooly.makeConnectionGlobal', (item: ConnectionTreeItem) => convertScopeCommand(connectionManager, item, 'global')),
+        vscode.commands.registerCommand('dbooly.makeConnectionProject', (item: ConnectionTreeItem) => convertScopeCommand(connectionManager, item, 'project'))
     );
 }
 
@@ -51,6 +59,7 @@ async function addConnectionCommand(manager: ConnectionManager): Promise<void> {
         extensionUri,
         undefined,
         'Add Connection',
+        manager.hasProjectOpen(),
         async (data) => {
             const connection = await manager.addConnection(data);
             // Auto-activate the new connection for immediate use
@@ -95,6 +104,7 @@ async function editConnectionCommand(manager: ConnectionManager, treeItem?: Conn
         extensionUri,
         existing,
         `Edit Connection: ${existing.name}`,
+        manager.hasProjectOpen(),
         async (data) => {
             await manager.updateConnection(connectionId, data);
             vscode.window.showInformationMessage(`Connection "${data.name}" updated successfully`);
@@ -167,4 +177,31 @@ async function listConnectionsCommand(manager: ConnectionManager): Promise<void>
         placeHolder: 'Saved connections',
         canPickMany: false,
     });
+}
+
+async function convertScopeCommand(manager: ConnectionManager, treeItem: ConnectionTreeItem, targetScope: ConnectionScope): Promise<void> {
+    const connection = treeItem?.connection;
+    if (!connection) {
+        return;
+    }
+
+    const targetLabel = targetScope === 'global' ? 'Global' : 'Project';
+    const confirm = await vscode.window.showWarningMessage(
+        `Move "${connection.name}" to ${targetLabel} scope?`,
+        { modal: true },
+        'Move'
+    );
+
+    if (confirm !== 'Move') {
+        return;
+    }
+
+    try {
+        await manager.convertConnectionScope(connection.id, targetScope);
+        vscode.window.showInformationMessage(`Connection "${connection.name}" moved to ${targetLabel}`);
+        refreshTree();
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        vscode.window.showErrorMessage(message);
+    }
 }

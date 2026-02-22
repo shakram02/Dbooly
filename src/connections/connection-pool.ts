@@ -1,5 +1,6 @@
 import * as mysql from 'mysql2/promise';
 import * as fs from 'fs';
+import { Client as PgClient } from 'pg';
 import { Database as SqlJsDatabase } from 'sql.js';
 import { ConnectionConfigWithPassword, ConnectionId } from '../models/connection';
 import { getSqlJs } from './sql-js-loader';
@@ -7,11 +8,16 @@ import { getSqlJs } from './sql-js-loader';
 // Re-export setSqlJsWasmPath for convenience
 export { setSqlJsWasmPath } from './sql-js-loader';
 
-export type PooledConnection = mysql.Connection | SqlJsDatabase;
+export type PooledConnection = mysql.Connection | SqlJsDatabase | PgClient;
 
 // Type guard to check if connection is SQLite (sql.js)
 export function isSQLiteDatabase(conn: PooledConnection): conn is SqlJsDatabase {
     return 'exec' in conn && 'run' in conn && !('ping' in conn);
+}
+
+// Type guard to check if connection is PostgreSQL (pg.Client)
+export function isPostgreSQLClient(conn: PooledConnection): conn is PgClient {
+    return conn instanceof PgClient;
 }
 
 export class ConnectionPool {
@@ -27,6 +33,9 @@ export class ConnectionPool {
                 if (isSQLiteDatabase(existing)) {
                     // SQLite: run a simple query to check connection
                     existing.exec('SELECT 1');
+                } else if (isPostgreSQLClient(existing)) {
+                    // PostgreSQL: use a simple query
+                    await existing.query('SELECT 1');
                 } else {
                     // MySQL: use ping
                     await existing.ping();
@@ -53,6 +62,20 @@ export class ConnectionPool {
                 database: config.database,
                 connectTimeout: 10000,
             });
+        }
+
+        if (config.type === 'postgresql') {
+            const client = new PgClient({
+                host: config.host,
+                port: config.port,
+                user: config.username,
+                password: config.password,
+                database: config.database,
+                connectionTimeoutMillis: 10000,
+                ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
+            });
+            await client.connect();
+            return client;
         }
 
         if (config.type === 'sqlite') {
@@ -98,6 +121,8 @@ export class ConnectionPool {
                     // Save any pending changes before closing
                     await this.saveSQLiteDatabase(connectionId);
                     connection.close();
+                } else if (isPostgreSQLClient(connection)) {
+                    await connection.end();
                 } else {
                     await connection.end();
                 }
@@ -116,6 +141,8 @@ export class ConnectionPool {
                     if (isSQLiteDatabase(conn)) {
                         await this.saveSQLiteDatabase(id);
                         conn.close();
+                    } else if (isPostgreSQLClient(conn)) {
+                        await conn.end();
                     } else {
                         await conn.end();
                     }

@@ -8,7 +8,7 @@ import {
 } from 'vscode-languageclient/node';
 import { ConnectionManager } from '../connections/connection-manager';
 import { ConnectionPool } from '../connections/connection-pool';
-import { ConnectionId, isMySQLConnection, isSQLiteConnection } from '../models/connection';
+import { ConnectionId, isMySQLConnection, isSQLiteConnection, isPostgreSQLConnection } from '../models/connection';
 import { SchemaCache } from './schema-cache';
 import { splitSqlStatements, findStatementAtLine, SqlStatement } from '../sql/sql-statement-splitter';
 import { log, logError } from '../logger';
@@ -338,8 +338,19 @@ export class SqlLanguageServerClient implements vscode.Disposable {
                     database: config.database
                 }]
             };
+        } else if (isPostgreSQLConnection(config)) {
+            dbConfig = {
+                connections: [{
+                    name: config.name,
+                    adapter: 'postgres',
+                    host: config.host,
+                    port: config.port,
+                    user: config.username,
+                    password: config.password,
+                    database: config.database
+                }]
+            };
         } else {
-            // This branch should never be reached due to exhaustive type checking
             logError(`SQL Language Server: Unsupported database type`);
             return;
         }

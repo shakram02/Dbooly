@@ -127,8 +127,9 @@ export class SqlFormatter implements vscode.DocumentFormattingEditProvider {
         }
 
         const dialectMap: Record<DatabaseType, 'mysql' | 'postgresql' | 'sql'> = {
-            mysql: 'mysql'
-            // Add more as dbooly supports them
+            mysql: 'mysql',
+            sqlite: 'sql',
+            postgresql: 'postgresql',
         };
 
         return dialectMap[conn.type] || 'sql';

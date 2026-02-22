@@ -4,6 +4,7 @@ import { ColumnInfo } from '../models/column';
 import { ConnectionPool } from '../connections/connection-pool';
 import { MySQLSchemaProvider } from './mysql-schema-provider';
 import { SQLiteSchemaProvider } from './sqlite-schema-provider';
+import { PostgreSQLSchemaProvider } from './postgresql-schema-provider';
 
 export interface QueryResult {
     columns: string[];
@@ -61,6 +62,7 @@ export interface SchemaProvider {
 const providers: Record<DatabaseType, SchemaProvider> = {
     mysql: new MySQLSchemaProvider(),
     sqlite: new SQLiteSchemaProvider(),
+    postgresql: new PostgreSQLSchemaProvider(),
 };
 
 export function getSchemaProvider(type: DatabaseType): SchemaProvider {

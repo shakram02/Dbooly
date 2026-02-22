@@ -1,7 +1,8 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import { ConnectionConfig, ConnectionConfigWithPassword, ConnectionId, isSQLiteConnection } from '../models/connection';
+import { ConnectionConfig, ConnectionConfigWithPassword, ConnectionId, ConnectionScope, isSQLiteConnection } from '../models/connection';
 import { ConnectionStorage } from './connection-storage';
+import { GlobalConnectionStorage } from './global-connection-storage';
 import { log } from '../logger';
 
 export class ConnectionManager {
@@ -19,7 +20,10 @@ export class ConnectionManager {
     // Mutex for password prompts - prevents multiple concurrent prompts
     private passwordPromptInProgress: Map<ConnectionId, Promise<boolean>> = new Map();
 
-    constructor(private readonly storage: ConnectionStorage) {}
+    constructor(
+        private readonly projectStorage: ConnectionStorage,
+        private readonly globalStorage: GlobalConnectionStorage,
+    ) {}
 
     /**
      * Sets the active connection. Only one connection can be active at a time.
@@ -54,12 +58,33 @@ export class ConnectionManager {
     }
 
     async initialize(): Promise<void> {
-        const connections = await this.storage.loadConnections();
         this.connections.clear();
-        for (const conn of connections) {
+
+        // Load project connections and migrate legacy ones missing scope
+        const projectConnections = await this.projectStorage.loadConnections();
+        let needsProjectResave = false;
+        for (const conn of projectConnections) {
+            if (!conn.scope) {
+                (conn as { scope: ConnectionScope }).scope = 'project';
+                needsProjectResave = true;
+            }
             this.connections.set(conn.id, conn);
         }
-        log(`ConnectionManager: Loaded ${connections.length} connection(s)`);
+        if (needsProjectResave && projectConnections.length > 0) {
+            await this.projectStorage.saveConnections(projectConnections);
+            log('ConnectionManager: Migrated legacy project connections (stamped scope)');
+        }
+
+        // Load global connections
+        const globalConnections = await this.globalStorage.loadConnections();
+        for (const conn of globalConnections) {
+            if (!conn.scope) {
+                (conn as { scope: ConnectionScope }).scope = 'global';
+            }
+            this.connections.set(conn.id, conn);
+        }
+
+        log(`ConnectionManager: Loaded ${projectConnections.length} project + ${globalConnections.length} global connection(s)`);
     }
 
     async addConnection(config: Omit<ConnectionConfigWithPassword, 'id'>): Promise<ConnectionConfig> {
@@ -68,22 +93,23 @@ export class ConnectionManager {
         }
 
         const id = this.generateDeterministicId(config.name);
+        const scope = config.scope || 'global';
 
         // SQLite doesn't have password, handle separately
         if (config.type === 'sqlite') {
-            const connection: ConnectionConfig = { id, ...config };
+            const connection = { id, ...config, scope } as ConnectionConfig;
             this.connections.set(id, connection);
-            await this.storage.saveConnections(Array.from(this.connections.values()));
+            await this.saveConnectionsForScope(scope);
             return connection;
         }
 
-        // MySQL and other password-based connections
-        const { password, ...connectionWithoutPassword } = config;
-        const connection: ConnectionConfig = { id, ...connectionWithoutPassword };
+        // MySQL and PostgreSQL password-based connections
+        const { password, ...connectionWithoutPassword } = config as unknown as { password: string } & Record<string, unknown>;
+        const connection = { id, ...connectionWithoutPassword, scope } as ConnectionConfig;
 
         this.connections.set(id, connection);
-        await this.storage.setPassword(id, password);
-        await this.storage.saveConnections(Array.from(this.connections.values()));
+        await this.projectStorage.setPassword(id, password);
+        await this.saveConnectionsForScope(scope);
 
         return connection;
     }
@@ -98,20 +124,35 @@ export class ConnectionManager {
             throw new Error(`Connection with name "${updates.name}" already exists`);
         }
 
-        const { password, ...updatesWithoutPassword } = updates as Partial<ConnectionConfigWithPassword>;
-        const updated: ConnectionConfig = { ...existing, ...updatesWithoutPassword };
+        const { password, ...updatesWithoutPassword } = updates as { password?: string } & Record<string, unknown>;
+
+        // Check if scope is changing — handle conversion
+        const newScope = (updatesWithoutPassword.scope as ConnectionScope | undefined) || existing.scope;
+        const scopeChanged = newScope !== existing.scope;
+
+        const updated = { ...existing, ...updatesWithoutPassword, scope: newScope } as ConnectionConfig;
 
         this.connections.set(id, updated);
         if (password !== undefined) {
-            await this.storage.setPassword(id, password);
+            await this.projectStorage.setPassword(id, password);
         }
-        await this.storage.saveConnections(Array.from(this.connections.values()));
+
+        if (scopeChanged) {
+            // Remove from old scope storage, save to new scope storage
+            await this.saveConnectionsForScope(existing.scope);
+            await this.saveConnectionsForScope(newScope);
+            // Migrate starred tables
+            this.migrateStarredTables(id, existing.scope, newScope);
+        } else {
+            await this.saveConnectionsForScope(existing.scope);
+        }
 
         return updated;
     }
 
     async deleteConnection(id: ConnectionId): Promise<void> {
-        if (!this.connections.has(id)) {
+        const connection = this.connections.get(id);
+        if (!connection) {
             throw new Error(`Connection with id "${id}" not found`);
         }
 
@@ -120,18 +161,52 @@ export class ConnectionManager {
             this.setActiveConnection(null);
         }
 
+        const scope = connection.scope;
         this.connections.delete(id);
-        await this.storage.deletePassword(id);
-        this.storage.clearStarredTables(id);
-        await this.storage.saveConnections(Array.from(this.connections.values()));
+        await this.projectStorage.deletePassword(id);
+        this.getStorageForScope(scope).clearStarredTables(id);
+        await this.saveConnectionsForScope(scope);
+    }
+
+    async convertConnectionScope(id: ConnectionId, targetScope: ConnectionScope): Promise<void> {
+        const connection = this.connections.get(id);
+        if (!connection) {
+            throw new Error(`Connection with id "${id}" not found`);
+        }
+
+        if (connection.scope === targetScope) {
+            return;
+        }
+
+        if (targetScope === 'project' && !vscode.workspace.workspaceFolders?.[0]) {
+            throw new Error('Cannot convert to project scope: no project is open');
+        }
+
+        const oldScope = connection.scope;
+        const updated = { ...connection, scope: targetScope };
+        this.connections.set(id, updated);
+
+        // Save both storages (remove from old, add to new)
+        await this.saveConnectionsForScope(oldScope);
+        await this.saveConnectionsForScope(targetScope);
+
+        // Migrate starred tables
+        this.migrateStarredTables(id, oldScope, targetScope);
     }
 
     getConnection(id: ConnectionId): ConnectionConfig | undefined {
         return this.connections.get(id);
     }
 
+    /**
+     * Returns all connections, project-scoped first, then global-scoped.
+     * Within each group, insertion order is preserved.
+     */
     getAllConnections(): ConnectionConfig[] {
-        return Array.from(this.connections.values());
+        const all = Array.from(this.connections.values());
+        const project = all.filter(c => c.scope === 'project');
+        const global = all.filter(c => c.scope === 'global');
+        return [...project, ...global];
     }
 
     async getConnectionWithPassword(id: ConnectionId): Promise<ConnectionConfigWithPassword | undefined> {
@@ -145,7 +220,7 @@ export class ConnectionManager {
             return connection;
         }
 
-        const password = await this.storage.getPassword(id) || '';
+        const password = await this.projectStorage.getPassword(id) || '';
         return { ...connection, password };
     }
 
@@ -173,7 +248,7 @@ export class ConnectionManager {
             return operation(connection);
         }
 
-        const existingPassword = await this.storage.getPassword(id);
+        const existingPassword = await this.projectStorage.getPassword(id);
 
         if (!existingPassword) {
             // No password set
@@ -213,12 +288,40 @@ export class ConnectionManager {
             return true;
         }
 
-        const existingPassword = await this.storage.getPassword(id);
+        const existingPassword = await this.projectStorage.getPassword(id);
         if (existingPassword) {
             return true;
         }
 
         return this.promptForPassword(id, connection.name);
+    }
+
+    /**
+     * Returns the appropriate storage for starred tables based on connection scope.
+     */
+    getStorageForScope(scope: ConnectionScope): ConnectionStorage | GlobalConnectionStorage {
+        return scope === 'global' ? this.globalStorage : this.projectStorage;
+    }
+
+    /**
+     * Returns the project storage (for password operations and backwards compat).
+     */
+    getStorage(): ConnectionStorage {
+        return this.projectStorage;
+    }
+
+    /**
+     * Saves connections for the given scope. Used by tree provider after modifying starred tables.
+     */
+    async saveStarredTablesForScope(scope: ConnectionScope): Promise<void> {
+        await this.saveConnectionsForScope(scope);
+    }
+
+    /**
+     * Returns whether a project/workspace folder is currently open.
+     */
+    hasProjectOpen(): boolean {
+        return !!vscode.workspace.workspaceFolders?.[0];
     }
 
     /**
@@ -255,7 +358,7 @@ export class ConnectionManager {
         });
 
         if (password) {
-            await this.storage.setPassword(id, password);
+            await this.projectStorage.setPassword(id, password);
             this._onDidSetPassword.fire(id);
             return true;
         }
@@ -263,8 +366,26 @@ export class ConnectionManager {
         return false;
     }
 
-    getStorage(): ConnectionStorage {
-        return this.storage;
+    /**
+     * Saves only the connections belonging to a specific scope to the appropriate storage.
+     */
+    private async saveConnectionsForScope(scope: ConnectionScope): Promise<void> {
+        const connections = Array.from(this.connections.values()).filter(c => c.scope === scope);
+        if (scope === 'global') {
+            await this.globalStorage.saveConnections(connections);
+        } else {
+            await this.projectStorage.saveConnections(connections);
+        }
+    }
+
+    private migrateStarredTables(connectionId: ConnectionId, fromScope: ConnectionScope, toScope: ConnectionScope): void {
+        const fromStorage = this.getStorageForScope(fromScope);
+        const toStorage = this.getStorageForScope(toScope);
+        const starred = fromStorage.getStarredTables(connectionId);
+        for (const table of starred) {
+            toStorage.setTableStarred(connectionId, table, true);
+        }
+        fromStorage.clearStarredTables(connectionId);
     }
 
     private findByName(name: string): ConnectionConfig | undefined {

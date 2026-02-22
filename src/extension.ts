@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ConnectionStorage } from './connections/connection-storage';
+import { GlobalConnectionStorage } from './connections/global-connection-storage';
 import { ConnectionManager } from './connections/connection-manager';
 import { ConnectionPool, setSqlJsWasmPath } from './connections/connection-pool';
 import { registerConnectionCommands, setTreeProvider, setExtensionUri } from './connections/connection-commands';
@@ -29,8 +30,9 @@ export async function activate(context: vscode.ExtensionContext) {
     // Initialize sql.js WASM path for SQLite support
     setSqlJsWasmPath(context.extensionPath);
 
-    const storage = new ConnectionStorage(context.secrets);
-    connectionManager = new ConnectionManager(storage);
+    const projectStorage = new ConnectionStorage(context.secrets);
+    const globalStorage = new GlobalConnectionStorage(context.globalStorageUri);
+    connectionManager = new ConnectionManager(projectStorage, globalStorage);
     connectionPool = new ConnectionPool();
 
     await connectionManager.initialize();

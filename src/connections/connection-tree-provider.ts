@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from './connection-manager';
 import { ConnectionPool } from './connection-pool';
-import { ConnectionConfig, ConnectionId, isMySQLConnection } from '../models/connection';
+import { ConnectionConfig, ConnectionId, isMySQLConnection, isPostgreSQLConnection } from '../models/connection';
 import { TableInfo } from '../models/table';
 import { ColumnInfo } from '../models/column';
 import { getSchemaProvider, SortOptions } from '../providers/schema-provider';
@@ -140,6 +140,23 @@ export class TableTreeItem extends vscode.TreeItem {
     }
 }
 
+export class ScopeDividerTreeItem extends vscode.TreeItem {
+    constructor(
+        public readonly scope: 'project' | 'global',
+        public readonly connectionCount: number,
+    ) {
+        super(
+            scope === 'project' ? 'Project' : 'Global',
+            vscode.TreeItemCollapsibleState.Expanded,
+        );
+        this.description = `${connectionCount}`;
+        this.contextValue = 'scope-divider';
+        this.iconPath = scope === 'global'
+            ? new vscode.ThemeIcon('globe')
+            : new vscode.ThemeIcon('root-folder');
+    }
+}
+
 export class ConnectionTreeItem extends vscode.TreeItem {
     constructor(
         public readonly connection: ConnectionConfig,
@@ -151,42 +168,36 @@ export class ConnectionTreeItem extends vscode.TreeItem {
         // Type-specific tooltip
         if (isMySQLConnection(connection)) {
             this.tooltip = `${connection.username}@${connection.host}:${connection.port}/${connection.database}${isActive ? ' (Active)' : ''}`;
+        } else if (isPostgreSQLConnection(connection)) {
+            this.tooltip = `${connection.username}@${connection.host}:${connection.port}/${connection.database}${connection.ssl ? ' (SSL)' : ''}${isActive ? ' (Active)' : ''}`;
         } else {
             this.tooltip = `${connection.filePath}${isActive ? ' (Active)' : ''}`;
         }
         this.description = connection.type;
 
-        // Context value includes active state for context menu filtering
+        // Context value includes active state and scope for context menu filtering
+        const isGlobal = connection.scope === 'global';
+        const scopePrefix = isGlobal ? 'connection-global' : 'connection-project';
         if (isActive) {
-            this.contextValue = tablesLoaded ? 'connection-loaded-active' : 'connection-active';
+            this.contextValue = tablesLoaded ? `${scopePrefix}-loaded-active` : `${scopePrefix}-active`;
         } else {
-            this.contextValue = tablesLoaded ? 'connection-loaded' : 'connection';
+            this.contextValue = tablesLoaded ? `${scopePrefix}-loaded` : scopePrefix;
         }
 
-        // Active connection: green badge overlay on database icon
-        // Inactive connection: deemphasized (grayed out) styling
-        if (isActive) {
-            this.iconPath = new vscode.ThemeIcon('database', new vscode.ThemeColor('charts.green'));
-        } else {
-            this.iconPath = new vscode.ThemeIcon('database');
-        }
-
-        // Apply deemphasized foreground color to inactive connections
-        if (!isActive) {
-            // Note: VSCode TreeItem doesn't support direct label color changes
-            // We rely on the icon color and description to convey inactive state
-            // The grayed-out effect is achieved through the icon not having a highlight color
-        }
+        // Database icon for all connections; active connections get green tint
+        this.iconPath = isActive
+            ? new vscode.ThemeIcon('database', new vscode.ThemeColor('charts.green'))
+            : new vscode.ThemeIcon('database');
 
         // ARIA label for accessibility
         this.accessibilityInformation = {
-            label: `${connection.name} database connection${isActive ? ', active' : ''}`,
+            label: `${connection.name} database connection${isGlobal ? ', global' : ''}${isActive ? ', active' : ''}`,
             role: 'treeitem',
         };
     }
 }
 
-export type TreeItem = ConnectionTreeItem | TableTreeItem | ColumnTreeItem | LoadingTreeItem | ErrorTreeItem | EmptyTreeItem;
+export type TreeItem = ScopeDividerTreeItem | ConnectionTreeItem | TableTreeItem | ColumnTreeItem | LoadingTreeItem | ErrorTreeItem | EmptyTreeItem;
 
 export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<TreeItem | undefined | void>();
@@ -197,6 +208,8 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
     private disposables: vscode.Disposable[] = [];
     // Track connections that are currently loading tables
     private loadingConnections: Set<ConnectionId> = new Set();
+    // Track connections that failed to load (prevents infinite retry on tree re-render)
+    private failedConnections: Map<ConnectionId, string> = new Map();
 
     constructor(
         private readonly connectionManager: ConnectionManager,
@@ -220,12 +233,14 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
     refresh(): void {
         this.tableCache.clear();
         this.columnCache.clear();
+        this.failedConnections.clear();
         this._onDidChangeTreeData.fire();
     }
 
     refreshConnection(connectionId: ConnectionId): void {
         this.tableCache.delete(connectionId);
         this.columnCache.clearByPrefix(`${connectionId}:`);
+        this.failedConnections.delete(connectionId);
         this._onDidChangeTreeData.fire();
     }
 
@@ -239,13 +254,11 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
 
     async getChildren(element?: TreeItem): Promise<TreeItem[]> {
         if (!element) {
-            const connections = this.connectionManager.getAllConnections();
-            const activeId = this.connectionManager.getActiveConnectionId();
-            return connections.map(conn => new ConnectionTreeItem(
-                conn,
-                this.tableCache.has(conn.id),
-                conn.id === activeId
-            ));
+            return this.getRootChildren();
+        }
+
+        if (element instanceof ScopeDividerTreeItem) {
+            return this.getConnectionsForScope(element.scope);
         }
 
         if (element instanceof ConnectionTreeItem) {
@@ -259,13 +272,48 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
         return [];
     }
 
+    private getRootChildren(): TreeItem[] {
+        const all = this.connectionManager.getAllConnections();
+        const project = all.filter(c => c.scope === 'project');
+        const global = all.filter(c => c.scope === 'global');
+
+        const items: TreeItem[] = [];
+
+        // Only show dividers when both scopes have connections
+        if (project.length > 0 && global.length > 0) {
+            items.push(new ScopeDividerTreeItem('project', project.length));
+            items.push(new ScopeDividerTreeItem('global', global.length));
+        } else {
+            // Single scope — show connections directly without dividers
+            const activeId = this.connectionManager.getActiveConnectionId();
+            for (const conn of all) {
+                items.push(new ConnectionTreeItem(conn, this.tableCache.has(conn.id), conn.id === activeId));
+            }
+        }
+
+        return items;
+    }
+
+    private getConnectionsForScope(scope: 'project' | 'global'): TreeItem[] {
+        const all = this.connectionManager.getAllConnections();
+        const filtered = all.filter(c => c.scope === scope);
+        const activeId = this.connectionManager.getActiveConnectionId();
+        return filtered.map(conn => new ConnectionTreeItem(conn, this.tableCache.has(conn.id), conn.id === activeId));
+    }
+
     private getTablesForConnection(connection: ConnectionConfig): TreeItem[] {
         // Check if we have cached data
         const cached = this.tableCache.get(connection.id);
         if (cached) {
-            const starredSet = this.connectionManager.getStorage().getStarredTables(connection.id);
+            const starredSet = this.connectionManager.getStorageForScope(connection.scope).getStarredTables(connection.id);
             const sorted = sortTablesStarredFirst(cached, starredSet);
             return sorted.map(t => new TableTreeItem(t, starredSet.has(t.name)));
+        }
+
+        // Show error if previously failed (user can retry via toast or refresh button)
+        const failureMessage = this.failedConnections.get(connection.id);
+        if (failureMessage) {
+            return [new ErrorTreeItem(failureMessage)];
         }
 
         // Check if already loading
@@ -285,7 +333,6 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
             await this.fetchTablesForConnection(connectionId);
         } finally {
             this.loadingConnections.delete(connectionId);
-            // Refresh the tree to show the loaded tables
             this._onDidChangeTreeData.fire();
         }
     }
@@ -366,6 +413,7 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
             return tables;
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error';
+            this.failedConnections.set(connectionId, `Failed to connect: ${message}`);
             vscode.window.showErrorMessage(
                 `Failed to list tables for "${connection.name}": ${message}`,
                 'Retry'
@@ -425,7 +473,7 @@ export function registerTreeView(
                 return;
             }
 
-            const storage = connectionManager.getStorage();
+            const storage = connectionManager.getStorageForScope(connection.scope);
             TableSearchPanel.show(
                 context.extensionUri,
                 connection,
@@ -437,7 +485,7 @@ export function registerTreeView(
                 () => storage.getStarredTables(connection.id),
                 async (tableName, starred) => {
                     storage.setTableStarred(connection.id, tableName, starred);
-                    await storage.saveConnections(connectionManager.getAllConnections());
+                    await connectionManager.saveStarredTablesForScope(connection.scope);
                     treeProvider.fireTreeDataChange();
                 }
             );
@@ -449,9 +497,12 @@ export function registerTreeView(
             const table = item?.table;
             if (!table) return;
 
-            const storage = connectionManager.getStorage();
+            const connection = connectionManager.getConnection(table.connectionId);
+            if (!connection) return;
+
+            const storage = connectionManager.getStorageForScope(connection.scope);
             storage.setTableStarred(table.connectionId, table.name, true);
-            await storage.saveConnections(connectionManager.getAllConnections());
+            await connectionManager.saveStarredTablesForScope(connection.scope);
             treeProvider.fireTreeDataChange();
         })
     );
@@ -461,9 +512,12 @@ export function registerTreeView(
             const table = item?.table;
             if (!table) return;
 
-            const storage = connectionManager.getStorage();
+            const connection = connectionManager.getConnection(table.connectionId);
+            if (!connection) return;
+
+            const storage = connectionManager.getStorageForScope(connection.scope);
             storage.setTableStarred(table.connectionId, table.name, false);
-            await storage.saveConnections(connectionManager.getAllConnections());
+            await connectionManager.saveStarredTablesForScope(connection.scope);
             treeProvider.fireTreeDataChange();
         })
     );

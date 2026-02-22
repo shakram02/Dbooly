@@ -1,6 +1,7 @@
 import * as mysql from 'mysql2/promise';
 import * as fs from 'fs';
-import { ConnectionConfigWithPassword, MySQLConnectionConfigWithPassword, SQLiteConnectionConfigWithPassword } from '../models/connection';
+import { Client as PgClient } from 'pg';
+import { ConnectionConfigWithPassword, MySQLConnectionConfigWithPassword, SQLiteConnectionConfigWithPassword, PostgreSQLConnectionConfigWithPassword } from '../models/connection';
 import { getSqlJs } from './sql-js-loader';
 
 export interface TestResult {
@@ -11,6 +12,7 @@ export interface TestResult {
 type TestableConfig = Omit<ConnectionConfigWithPassword, 'id'>;
 type TestableMySQLConfig = Omit<MySQLConnectionConfigWithPassword, 'id'>;
 type TestableSQLiteConfig = Omit<SQLiteConnectionConfigWithPassword, 'id'>;
+type TestablePostgreSQLConfig = Omit<PostgreSQLConnectionConfigWithPassword, 'id'>;
 
 export async function testConnection(config: TestableConfig): Promise<TestResult> {
     if (config.type === 'mysql') {
@@ -18,6 +20,9 @@ export async function testConnection(config: TestableConfig): Promise<TestResult
     }
     if (config.type === 'sqlite') {
         return testSQLiteConnection(config as TestableSQLiteConfig);
+    }
+    if (config.type === 'postgresql') {
+        return testPostgreSQLConnection(config as TestablePostgreSQLConfig);
     }
     return { success: false, message: `Unsupported database type: ${(config as { type: string }).type}` };
 }
@@ -72,5 +77,37 @@ async function testSQLiteConnection(config: TestableSQLiteConfig): Promise<TestR
     } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
         return { success: false, message: `Connection failed: ${message}` };
+    }
+}
+
+async function testPostgreSQLConnection(config: TestablePostgreSQLConfig): Promise<TestResult> {
+    let client: PgClient | undefined;
+
+    try {
+        client = new PgClient({
+            host: config.host,
+            port: config.port,
+            user: config.username,
+            password: config.password,
+            database: config.database,
+            connectionTimeoutMillis: 10000,
+            ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
+        });
+
+        await client.connect();
+        await client.query('SELECT 1');
+
+        return { success: true, message: 'Connection successful' };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        // Provide helpful hints for common SSL errors
+        if (message.includes('SSL') || message.includes('ssl')) {
+            return { success: false, message: `Connection failed: ${message}. Try toggling the SSL option.` };
+        }
+        return { success: false, message: `Connection failed: ${message}` };
+    } finally {
+        if (client) {
+            await client.end().catch(() => {});
+        }
     }
 }
