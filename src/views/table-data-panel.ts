@@ -27,6 +27,8 @@ export class TableDataPanel {
     private sortDirection: SortDirection = null;
     private config: PanelConfig;
     private getData: ((sort?: SortOptions) => Promise<QueryResult>) | null = null;
+    private webviewReady = false;
+    private pendingMessages: object[] = [];
 
     private constructor(
         panel: vscode.WebviewPanel,
@@ -39,10 +41,28 @@ export class TableDataPanel {
         this.setupMessageHandler();
     }
 
+    private postMessage(message: object): void {
+        if (this.webviewReady) {
+            this.panel.webview.postMessage(message);
+        } else {
+            this.pendingMessages.push(message);
+        }
+    }
+
+    private flushPendingMessages(): void {
+        for (const message of this.pendingMessages) {
+            this.panel.webview.postMessage(message);
+        }
+        this.pendingMessages = [];
+    }
+
     private setupMessageHandler(): void {
         this.panel.webview.onDidReceiveMessage(
             async (message) => {
-                if (message.command === 'sort' && this.getData && this.config.mode === 'table') {
+                if (message.command === 'ready') {
+                    this.webviewReady = true;
+                    this.flushPendingMessages();
+                } else if (message.command === 'sort' && this.getData && this.config.mode === 'table') {
                     // Table mode: server-side sorting
                     this.sortColumn = message.column;
                     this.sortDirection = message.direction;
@@ -134,7 +154,7 @@ export class TableDataPanel {
     // Methods for query results mode
     showExecuting(connectionName: string): void {
         this.config.subtitle = connectionName;
-        this.panel.webview.postMessage({
+        this.postMessage({
             command: 'loading',
             message: `Executing query on ${connectionName}...`,
         });
@@ -142,7 +162,7 @@ export class TableDataPanel {
 
     showResult(result: QueryExecutionResult): void {
         if (result.type === 'select' && result.columns && result.rows) {
-            this.panel.webview.postMessage({
+            this.postMessage({
                 command: 'data',
                 columns: result.columns,
                 rows: result.rows,
@@ -153,7 +173,7 @@ export class TableDataPanel {
             });
         } else {
             // INSERT/UPDATE/DELETE result
-            this.panel.webview.postMessage({
+            this.postMessage({
                 command: 'nonSelectResult',
                 query: result.query,
                 affectedRows: result.affectedRows ?? 0,
@@ -163,11 +183,11 @@ export class TableDataPanel {
     }
 
     showError(message: string): void {
-        this.panel.webview.postMessage({ command: 'error', message });
+        this.postMessage({ command: 'error', message });
     }
 
     showCancelled(): void {
-        this.panel.webview.postMessage({ command: 'cancelled' });
+        this.postMessage({ command: 'cancelled' });
     }
 
     private switchToQueryMode(): void {
@@ -179,6 +199,7 @@ export class TableDataPanel {
             this.sortColumn = null;
             this.sortDirection = null;
             this.panel.title = 'Query Results';
+            this.webviewReady = false;
             this.panel.webview.html = this.getHtml(this.panel.webview);
         }
     }
@@ -197,6 +218,7 @@ export class TableDataPanel {
         this.sortColumn = null;
         this.sortDirection = null;
         this.panel.title = `${table.name} - ${connection.name}`;
+        this.webviewReady = false;
         this.panel.webview.html = this.getHtml(this.panel.webview);
         this.loadData();
     }
@@ -205,7 +227,7 @@ export class TableDataPanel {
         if (!this.getData) return;
 
         if (!skipLoadingState) {
-            this.panel.webview.postMessage({ command: 'loading' });
+            this.postMessage({ command: 'loading' });
         }
 
         try {
@@ -213,7 +235,7 @@ export class TableDataPanel {
                 ? { column: this.sortColumn, direction: this.sortDirection }
                 : undefined;
             const result = await this.getData(sort);
-            this.panel.webview.postMessage({
+            this.postMessage({
                 command: 'data',
                 columns: result.columns,
                 rows: result.rows,
@@ -222,7 +244,7 @@ export class TableDataPanel {
             });
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to load data';
-            this.panel.webview.postMessage({ command: 'error', message });
+            this.postMessage({ command: 'error', message });
         }
     }
 
@@ -257,6 +279,7 @@ export class TableDataPanel {
             font-size: var(--vscode-font-size);
             color: var(--vscode-foreground);
             background-color: var(--vscode-editor-background);
+            color-scheme: var(--vscode-color-scheme);
             padding: 16px;
             margin: 0;
             height: 100vh;
@@ -576,6 +599,9 @@ export class TableDataPanel {
 
         const vscode = acquireVsCodeApi();
         const isQueryMode = ${isQueryMode};
+
+        // Signal the extension that the webview JS is ready to receive messages
+        vscode.postMessage({ command: 'ready' });
 
         let allColumns = [];
         let allRows = [];

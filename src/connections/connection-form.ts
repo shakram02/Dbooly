@@ -160,6 +160,7 @@ export class ConnectionFormPanel {
             font-size: var(--vscode-font-size);
             color: var(--vscode-foreground);
             background-color: var(--vscode-editor-background);
+            color-scheme: var(--vscode-color-scheme);
             padding: 20px;
             max-width: 500px;
             margin: 0 auto;

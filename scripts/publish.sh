@@ -140,8 +140,8 @@ else
     echo -e "${GREEN}VS Code Marketplace: published v${NEW_VERSION}${NC}"
     echo -e "${GREEN}Open VSX Registry:   published v${NEW_VERSION}${NC}"
 
-    # Commit version bump if version changed
-    if [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
+    # Commit version bump if version changed and files are dirty
+    if [ "$NEW_VERSION" != "$CURRENT_VERSION" ] && [ -n "$(git status --porcelain package.json package-lock.json)" ]; then
         git add package.json package-lock.json
         git commit -m "${NEW_VERSION}"
         git tag "v${NEW_VERSION}"

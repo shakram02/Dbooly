@@ -161,7 +161,7 @@ export class SqlExecutor {
                 return;
             }
 
-            log(`Execute: Query completed, ${result.rows.length} rows returned`);
+            log(`Execute: Query completed, ${result.rows?.length ?? result.affectedRows ?? 0} ${result.rows ? 'rows returned' : 'rows affected'}`);
             this.onResult(result);
         } catch (error) {
             if (this.abortController?.signal.aborted) {
