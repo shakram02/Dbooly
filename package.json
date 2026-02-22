@@ -2,7 +2,7 @@
   "name": "dbooly",
   "displayName": "dbooly",
   "description": "Database viewer and query tool for VSCode",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "publisher": "shakram02",
   "license": "MIT",
   "repository": {
