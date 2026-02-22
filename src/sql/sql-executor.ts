@@ -56,6 +56,12 @@ export function analyzeDestructiveOp(sql: string): DestructiveOp | null {
     return null;
 }
 
+export interface SqlFromEditor {
+    sql: string;
+    /** Last line of the statement (0-indexed), for inline decoration placement */
+    endLine: number;
+}
+
 /**
  * Gets the SQL to execute from the active editor.
  * Priority:
@@ -63,12 +69,12 @@ export function analyzeDestructiveOp(sql: string): DestructiveOp | null {
  * 2. Otherwise returns the statement at the cursor position
  * 3. Returns null if cursor is not in any statement
  */
-export function getSqlFromEditor(editor: vscode.TextEditor): string | null {
+export function getSqlFromEditor(editor: vscode.TextEditor): SqlFromEditor | null {
     const selection = editor.selection;
 
     // If there's an explicit selection, use it
     if (!selection.isEmpty) {
-        return editor.document.getText(selection);
+        return { sql: editor.document.getText(selection), endLine: selection.end.line };
     }
 
     // Find the statement at the cursor position
@@ -78,7 +84,7 @@ export function getSqlFromEditor(editor: vscode.TextEditor): string | null {
 
     const currentStmt = findStatementAtLine(statements, cursorLine);
     if (currentStmt) {
-        return currentStmt.text;
+        return { sql: currentStmt.text, endLine: currentStmt.endLine };
     }
 
     // No statement at cursor

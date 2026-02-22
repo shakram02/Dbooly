@@ -11,6 +11,7 @@ import { registerScriptCommands } from './scripts/script-commands';
 import { SqlExecutor, getSqlFromEditor } from './sql/sql-executor';
 import { SqlCodeLensProvider } from './sql/sql-codelens-provider';
 import { TableDataPanel } from './views/table-data-panel';
+import { InlineResultDecoration } from './views/inline-result-decoration';
 import { SqlLanguageServerClient } from './lsp/sql-language-server-client';
 import { SqlDiagnosticsProvider } from './diagnostics/sql-diagnostics-provider';
 import { SqlFormatter } from './sql/sql-formatter';
@@ -20,6 +21,8 @@ let connectionManager: ConnectionManager;
 let connectionPool: ConnectionPool;
 let sqlExecutor: SqlExecutor;
 let sqlLanguageServerClient: SqlLanguageServerClient;
+let inlineDecoration: InlineResultDecoration;
+let currentExecutionContext: { editor: vscode.TextEditor; endLine: number } | null = null;
 
 export async function activate(context: vscode.ExtensionContext) {
     const outputChannel = initLogger();
@@ -48,25 +51,41 @@ export async function activate(context: vscode.ExtensionContext) {
     const scriptTreeProvider = registerScriptTreeView(context, scriptStorage);
     registerScriptCommands(context, scriptStorage, scriptTreeProvider);
 
-    // Initialize SQL Executor with callbacks for results panel
+    // Initialize inline result decoration for non-SELECT feedback
+    inlineDecoration = new InlineResultDecoration();
+    context.subscriptions.push(inlineDecoration);
+
+    // Initialize SQL Executor with callbacks
     sqlExecutor = new SqlExecutor(
         connectionManager,
         connectionPool,
         (result) => {
-            const panel = TableDataPanel.showQueryResults();
-            panel.showResult(result);
+            if (result.type !== 'select' && currentExecutionContext) {
+                inlineDecoration.showResult(result.type, result.affectedRows ?? 0, result.executionTimeMs);
+            } else {
+                inlineDecoration.clear();
+                const panel = TableDataPanel.showQueryResults();
+                panel.showResult(result);
+            }
+            currentExecutionContext = null;
         },
         (error) => {
+            inlineDecoration.clear();
             const panel = TableDataPanel.showQueryResults();
             panel.showError(error);
+            currentExecutionContext = null;
         },
         (connectionName) => {
-            const panel = TableDataPanel.showQueryResults();
-            panel.showExecuting(connectionName);
+            if (currentExecutionContext) {
+                inlineDecoration.showExecuting(currentExecutionContext.editor, currentExecutionContext.endLine);
+            } else {
+                const panel = TableDataPanel.showQueryResults();
+                panel.showExecuting(connectionName);
+            }
         },
         () => {
-            const panel = TableDataPanel.showQueryResults();
-            panel.showCancelled();
+            inlineDecoration.clear();
+            currentExecutionContext = null;
         }
     );
 
@@ -79,12 +98,14 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            const sql = getSqlFromEditor(editor);
-            if (!sql) {
+            const result = getSqlFromEditor(editor);
+            if (!result) {
                 vscode.window.showWarningMessage('No SQL statement at cursor');
                 return;
             }
-            sqlExecutor.execute(sql);
+            currentExecutionContext = { editor, endLine: result.endLine };
+            inlineDecoration.clear();
+            sqlExecutor.execute(result.sql);
         })
     );
 
@@ -105,6 +126,8 @@ export async function activate(context: vscode.ExtensionContext) {
             }
 
             const sql = editor.document.getText(range);
+            currentExecutionContext = { editor, endLine: range.end.line };
+            inlineDecoration.clear();
             sqlExecutor.execute(sql);
         })
     );

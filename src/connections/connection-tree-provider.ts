@@ -414,6 +414,10 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error';
             this.failedConnections.set(connectionId, `Failed to connect: ${message}`);
+            // Clear active connection if this failed connection was active
+            if (this.connectionManager.getActiveConnectionId() === connectionId) {
+                this.connectionManager.setActiveConnection(null);
+            }
             vscode.window.showErrorMessage(
                 `Failed to list tables for "${connection.name}": ${message}`,
                 'Retry'
@@ -440,9 +444,10 @@ export function registerTreeView(
     });
 
     // Auto-activate connection when selected (clicked) in tree view
+    // Only activate if tables were already loaded (i.e. connection is known-good)
     treeView.onDidChangeSelection((e) => {
         const selected = e.selection[0];
-        if (selected instanceof ConnectionTreeItem && selected.connection) {
+        if (selected instanceof ConnectionTreeItem && selected.connection && selected.tablesLoaded) {
             connectionManager.setActiveConnection(selected.connection.id);
         }
     });
