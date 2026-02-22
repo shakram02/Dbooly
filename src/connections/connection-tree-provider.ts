@@ -443,11 +443,12 @@ export function registerTreeView(
         showCollapseAll: true,
     });
 
-    // Auto-activate connection when selected (clicked) in tree view
-    // Only activate if tables were already loaded (i.e. connection is known-good)
+    // Switch active connection when clicking a loaded connection in the tree.
+    // Connections are first activated on successful table fetch (fetchTablesForConnection),
+    // subsequent clicks switch between known-good connections.
     treeView.onDidChangeSelection((e) => {
         const selected = e.selection[0];
-        if (selected instanceof ConnectionTreeItem && selected.connection && selected.tablesLoaded) {
+        if (selected instanceof ConnectionTreeItem && selected.tablesLoaded) {
             connectionManager.setActiveConnection(selected.connection.id);
         }
     });

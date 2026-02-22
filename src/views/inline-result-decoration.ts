@@ -48,13 +48,16 @@ export class InlineResultDecoration implements vscode.Disposable {
         this.disposeExecuting();
         if (!this.currentEditor || this.currentLine === null) { return; }
 
-        const isWarning = queryType === 'delete' || queryType === 'ddl';
-        const icon = isWarning ? '\u26A0' : '\u2713';
+        const isDestructive = queryType === 'delete';
+        const isDdl = queryType === 'ddl';
+        const icon = isDestructive ? '\u2718' : isDdl ? '\u26A0' : '\u2713';
         const rowText = affectedRows === 1 ? '1 row affected' : `${affectedRows} rows affected`;
         const contentText = `  ${icon} ${rowText} (${executionTimeMs}ms)`;
 
         let color: vscode.ThemeColor;
-        if (isWarning) {
+        if (isDestructive) {
+            color = new vscode.ThemeColor('editorError.foreground');
+        } else if (isDdl) {
             color = new vscode.ThemeColor('editorWarning.foreground');
         } else if (queryType === 'insert') {
             color = new vscode.ThemeColor('testing.iconPassed');
