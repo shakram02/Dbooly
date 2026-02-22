@@ -781,7 +781,7 @@ export class TableDataPanel {
             allColumns.forEach((col, i) => {
                 const width = columnWidths[i] || 150;
                 const sortArrows = getSortArrows(col);
-                html += '<th style="width: ' + width + 'px; position: relative;" data-column="' + escapeHtml(col) + '" title="' + sortTooltip + '">' +
+                html += '<th style="width: ' + width + 'px; max-width: ' + width + 'px; position: relative;" data-column="' + escapeHtml(col) + '" title="' + sortTooltip + '">' +
                     '<span class="th-content">' +
                     '<span class="column-name">' + escapeHtml(col) + '</span>' +
                     sortArrows +
@@ -792,8 +792,9 @@ export class TableDataPanel {
 
             filteredRows.forEach(row => {
                 html += '<tr>';
-                row.forEach(cell => {
-                    html += '<td>' + formatValue(cell, searchTerm) + '</td>';
+                row.forEach((cell, i) => {
+                    const width = columnWidths[i] || 150;
+                    html += '<td style="max-width: ' + width + 'px;">' + formatValue(cell, searchTerm) + '</td>';
                 });
                 html += '</tr>';
             });
@@ -843,7 +844,14 @@ export class TableDataPanel {
                         const diff = e.clientX - startX;
                         const newWidth = Math.max(50, startWidth + diff);
                         th.style.width = newWidth + 'px';
+                        th.style.maxWidth = newWidth + 'px';
                         columnWidths[colIndex] = newWidth;
+                        // Update td max-width for this column
+                        const rows = contentDiv.querySelectorAll('tbody tr');
+                        rows.forEach(row => {
+                            const td = row.children[colIndex];
+                            if (td) td.style.maxWidth = newWidth + 'px';
+                        });
                     };
 
                     const onMouseUp = () => {
