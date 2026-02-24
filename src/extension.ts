@@ -10,8 +10,10 @@ import { registerScriptTreeView } from './scripts/script-tree-provider';
 import { registerScriptCommands } from './scripts/script-commands';
 import { SqlExecutor, getSqlFromEditor } from './sql/sql-executor';
 import { SqlCodeLensProvider } from './sql/sql-codelens-provider';
-import { TableDataPanel } from './views/table-data-panel';
+import { TableDataPanel, buildEditabilityInfo, MutationCallbacks } from './views/table-data-panel';
 import { InlineResultDecoration } from './views/inline-result-decoration';
+import { detectSingleTable } from './sql/sql-table-detector';
+import { getSchemaProvider } from './providers/schema-provider';
 import { SqlLanguageServerClient } from './lsp/sql-language-server-client';
 import { SqlDiagnosticsProvider } from './diagnostics/sql-diagnostics-provider';
 import { SqlFormatter } from './sql/sql-formatter';
@@ -59,13 +61,54 @@ export async function activate(context: vscode.ExtensionContext) {
     sqlExecutor = new SqlExecutor(
         connectionManager,
         connectionPool,
-        (result) => {
+        async (result) => {
             if (result.type !== 'select' && currentExecutionContext) {
                 inlineDecoration.showResult(result.type, result.affectedRows ?? 0, result.executionTimeMs);
             } else {
                 inlineDecoration.clear();
                 const panel = TableDataPanel.showQueryResults();
-                panel.showResult(result);
+
+                // Query mode: detect single-table for editability
+                let editabilityInfo;
+                let mutationCallbacks: MutationCallbacks | undefined;
+                if (result.type === 'select' && result.query) {
+                    const tableName = detectSingleTable(result.query);
+                    if (tableName) {
+                        try {
+                            const activeId = connectionManager.getActiveConnectionId();
+                            const conn = activeId ? connectionManager.getConnection(activeId) : null;
+                            const config = activeId ? await connectionManager.getConnectionWithPassword(activeId) : null;
+                            if (conn && config) {
+                                const provider = getSchemaProvider(conn.type);
+                                const columns = await provider.listColumns(connectionPool, config, tableName);
+                                editabilityInfo = buildEditabilityInfo(tableName, columns, 'TABLE', result.columns);
+                                if (editabilityInfo.editable) {
+                                    mutationCallbacks = {
+                                        async updateCell(tbl, primaryKeys, columnName, newValue) {
+                                            const cfg = await connectionManager.getConnectionWithPassword(activeId!);
+                                            if (!cfg) { return { success: false, error: 'Connection not found' }; }
+                                            return provider.updateCell(connectionPool, cfg, tbl, primaryKeys, columnName, newValue);
+                                        },
+                                        async insertRow(tbl, values) {
+                                            const cfg = await connectionManager.getConnectionWithPassword(activeId!);
+                                            if (!cfg) { return { success: false, error: 'Connection not found' }; }
+                                            return provider.insertRow(connectionPool, cfg, tbl, values);
+                                        },
+                                        async deleteRow(tbl, primaryKeys) {
+                                            const cfg = await connectionManager.getConnectionWithPassword(activeId!);
+                                            if (!cfg) { return { success: false, error: 'Connection not found' }; }
+                                            return provider.deleteRow(connectionPool, cfg, tbl, primaryKeys);
+                                        },
+                                    };
+                                }
+                            }
+                        } catch {
+                            // Failed to fetch metadata — proceed without editability
+                        }
+                    }
+                }
+
+                panel.showResult(result, editabilityInfo, mutationCallbacks);
             }
             currentExecutionContext = null;
         },

@@ -5,6 +5,7 @@ import { getSchemaProvider } from '../providers/schema-provider';
 import { TableInfo } from '../models/table';
 import { ColumnInfo } from '../models/column';
 import { log, logError } from '../logger';
+import { ddlDocumentUris } from '../lsp/sql-language-server-client';
 
 interface SchemaInfo {
     tables: Map<string, TableInfo>;
@@ -133,6 +134,12 @@ export class SqlDiagnosticsProvider implements vscode.Disposable {
     }
 
     private async updateDiagnostics(document: vscode.TextDocument): Promise<void> {
+        // Skip validation for DDL documents (read-only, may contain DB-specific syntax)
+        if (ddlDocumentUris.has(document.uri.toString())) {
+            this.diagnosticCollection.delete(document.uri);
+            return;
+        }
+
         const diagnostics: vscode.Diagnostic[] = [];
         const text = document.getText();
 

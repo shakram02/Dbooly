@@ -14,6 +14,17 @@ import { splitSqlStatements, findStatementAtLine, SqlStatement } from '../sql/sq
 import { log, logError } from '../logger';
 
 /**
+ * Tracks URIs of untitled documents opened by DDL commands.
+ * Used to suppress diagnostics from both the language server and our own provider.
+ */
+export const ddlDocumentUris = new Set<string>();
+
+// Clean up tracked URIs when documents are closed
+vscode.workspace.onDidCloseTextDocument(doc => {
+    ddlDocumentUris.delete(doc.uri.toString());
+});
+
+/**
  * SQL Language Server client for SQL completions and hover.
  *
  * Uses sql-language-server (npm package) with cached schema for instant completions.
@@ -442,8 +453,12 @@ export class SqlLanguageServerClient implements vscode.Disposable {
                 configurationSection: 'sqlLanguageServer'
             },
             middleware: {
-                // Filter diagnostics to only show for current/adjacent statements
+                // Suppress all diagnostics for DDL documents; filter others to current/adjacent statements
                 handleDiagnostics: (uri, diagnostics, next) => {
+                    if (ddlDocumentUris.has(uri.toString())) {
+                        next(uri, []);
+                        return;
+                    }
                     const filtered = this.filterDiagnosticsByStatement(uri, diagnostics);
                     next(uri, filtered);
                 },

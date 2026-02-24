@@ -2,7 +2,7 @@ import { ConnectionConfigWithPassword } from '../models/connection';
 import { TableInfo, TableType } from '../models/table';
 import { ColumnInfo, KeyType } from '../models/column';
 import { ConnectionPool } from '../connections/connection-pool';
-import { SchemaProvider, QueryResult, SortOptions, QueryExecutionOptions, QueryExecutionResult, QueryType } from './schema-provider';
+import { SchemaProvider, QueryResult, SortOptions, QueryExecutionOptions, QueryExecutionResult, QueryType, UpdateCellResult, InsertRowResult, DeleteRowResult } from './schema-provider';
 import { FieldPacket, ResultSetHeader } from 'mysql2/promise';
 
 /**
@@ -86,12 +86,36 @@ export class MySQLSchemaProvider implements SchemaProvider {
 
         const [rows] = await connection.query(query, [tableName]);
 
+        // Query for UNIQUE NOT NULL constraint columns
+        const uniqueQuery = `
+            SELECT kcu.COLUMN_NAME
+            FROM information_schema.TABLE_CONSTRAINTS tc
+            JOIN information_schema.KEY_COLUMN_USAGE kcu
+                ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+                AND tc.TABLE_NAME = kcu.TABLE_NAME
+            JOIN information_schema.COLUMNS c
+                ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+                AND c.TABLE_NAME = kcu.TABLE_NAME
+                AND c.COLUMN_NAME = kcu.COLUMN_NAME
+            WHERE tc.CONSTRAINT_TYPE = 'UNIQUE'
+                AND tc.TABLE_SCHEMA = DATABASE()
+                AND tc.TABLE_NAME = ?
+                AND c.IS_NULLABLE = 'NO'
+        `;
+        const [uniqueRows] = await connection.query(uniqueQuery, [tableName]);
+        const uniqueColumns = new Set(
+            (uniqueRows as Array<Record<string, unknown>>).map(r => r.COLUMN_NAME as string)
+        );
+
         return (rows as Array<Record<string, unknown>>).map(row => {
             let keyType: KeyType = null;
             if (row.COLUMN_KEY === 'PRI') {
                 keyType = 'PRIMARY';
             } else if (row.REFERENCED_TABLE_NAME) {
                 keyType = 'FOREIGN';
+            } else if (uniqueColumns.has(row.COLUMN_NAME as string)) {
+                keyType = 'UNIQUE';
             }
 
             return {
@@ -247,5 +271,136 @@ export class MySQLSchemaProvider implements SchemaProvider {
                 signal.removeEventListener('abort', abortHandler);
             }
         }
+    }
+
+    async updateCell(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string,
+        primaryKeys: Record<string, unknown>,
+        columnName: string,
+        newValue: unknown
+    ): Promise<UpdateCellResult> {
+        try {
+            const connection = await pool.getConnection(config);
+            const escapedTable = '`' + tableName.replace(/`/g, '``') + '`';
+            const escapedColumn = '`' + columnName.replace(/`/g, '``') + '`';
+
+            const pkEntries = Object.entries(primaryKeys);
+            const whereClauses = pkEntries.map(([key]) => '`' + key.replace(/`/g, '``') + '` = ?');
+            const params = [newValue, ...pkEntries.map(([, val]) => val)];
+
+            const sql = `UPDATE ${escapedTable} SET ${escapedColumn} = ? WHERE ${whereClauses.join(' AND ')}`;
+            await connection.query(sql, params);
+
+            // Re-fetch the updated row (use new PK values if the PK column was updated)
+            const selectPkValues = pkEntries.map(([key, val]) => key === columnName ? newValue : val);
+            const selectQuery = `SELECT * FROM ${escapedTable} WHERE ${whereClauses.join(' AND ')}`;
+            const [rows, fields] = await connection.query(selectQuery, selectPkValues) as [unknown[], FieldPacket[]];
+
+            const resultRows = rows as Array<Record<string, unknown>>;
+            if (resultRows.length > 0) {
+                const columns = fields.map(f => f.name);
+                const updatedRow = columns.map(col => resultRows[0][col]);
+                return { success: true, updatedRow };
+            }
+
+            return { success: true };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    }
+
+    async insertRow(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string,
+        values: Record<string, unknown>
+    ): Promise<InsertRowResult> {
+        try {
+            const connection = await pool.getConnection(config);
+            const escapedTable = '`' + tableName.replace(/`/g, '``') + '`';
+
+            const entries = Object.entries(values);
+            let sql: string;
+            let params: unknown[];
+
+            if (entries.length === 0) {
+                // Insert with all defaults
+                sql = `INSERT INTO ${escapedTable} () VALUES ()`;
+                params = [];
+            } else {
+                const columns = entries.map(([key]) => '`' + key.replace(/`/g, '``') + '`');
+                const placeholders = entries.map(() => '?');
+                params = entries.map(([, val]) => val);
+                sql = `INSERT INTO ${escapedTable} (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`;
+            }
+
+            const [result] = await connection.query(sql, params) as [ResultSetHeader, unknown];
+
+            // Try to fetch the newly inserted row using LAST_INSERT_ID
+            if (result.insertId) {
+                const [rows, fields] = await connection.query(
+                    `SELECT * FROM ${escapedTable} WHERE ROWID = LAST_INSERT_ID()` // MySQL alias
+                ) as [unknown[], FieldPacket[]];
+
+                // Fallback: query by insert ID if ROWID doesn't work
+                const resultRows = rows as Array<Record<string, unknown>>;
+                if (resultRows.length > 0) {
+                    const columns = fields.map(f => f.name);
+                    return { success: true, newRow: columns.map(col => resultRows[0][col]) };
+                }
+            }
+
+            return { success: true };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    }
+
+    async deleteRow(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string,
+        primaryKeys: Record<string, unknown>
+    ): Promise<DeleteRowResult> {
+        try {
+            const connection = await pool.getConnection(config);
+            const escapedTable = '`' + tableName.replace(/`/g, '``') + '`';
+
+            const pkEntries = Object.entries(primaryKeys);
+            const whereClauses = pkEntries.map(([key]) => '`' + key.replace(/`/g, '``') + '` = ?');
+            const params = pkEntries.map(([, val]) => val);
+
+            const sql = `DELETE FROM ${escapedTable} WHERE ${whereClauses.join(' AND ')}`;
+            await connection.query(sql, params);
+
+            return { success: true };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    }
+
+    async getTableDDL(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string
+    ): Promise<string> {
+        const connection = await pool.getConnection(config);
+        const escapedTable = '`' + tableName.replace(/`/g, '``') + '`';
+        const [rows] = await connection.query(`SHOW CREATE TABLE ${escapedTable}`);
+        const result = (rows as Array<Record<string, string>>)[0];
+        if (!result) {
+            throw new Error(`Table "${tableName}" not found`);
+        }
+        // SHOW CREATE TABLE returns "Create Table" or "Create View" column
+        const ddl = result['Create Table'] ?? result['Create View'];
+        if (!ddl) {
+            throw new Error(`Could not retrieve DDL for "${tableName}"`);
+        }
+        return ddl.endsWith(';') ? ddl : ddl + ';';
     }
 }

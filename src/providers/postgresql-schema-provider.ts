@@ -3,7 +3,7 @@ import { ConnectionConfigWithPassword } from '../models/connection';
 import { TableInfo, TableType } from '../models/table';
 import { ColumnInfo, KeyType } from '../models/column';
 import { ConnectionPool, isPostgreSQLClient } from '../connections/connection-pool';
-import { SchemaProvider, QueryResult, SortOptions, QueryExecutionOptions, QueryExecutionResult, QueryType } from './schema-provider';
+import { SchemaProvider, QueryResult, SortOptions, QueryExecutionOptions, QueryExecutionResult, QueryType, UpdateCellResult, InsertRowResult, DeleteRowResult } from './schema-provider';
 
 function detectQueryType(sql: string): QueryType {
     const normalized = sql
@@ -68,6 +68,7 @@ export class PostgreSQLSchemaProvider implements SchemaProvider {
                 c.is_nullable,
                 c.column_default,
                 CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END AS is_primary_key,
+                CASE WHEN uq.column_name IS NOT NULL THEN true ELSE false END AS is_unique_key,
                 fk.foreign_table_name,
                 fk.foreign_column_name
             FROM information_schema.columns c
@@ -97,6 +98,16 @@ export class PostgreSQLSchemaProvider implements SchemaProvider {
                     AND tc.table_schema = 'public'
                     AND tc.table_name = $1
             ) fk ON c.column_name = fk.column_name
+            LEFT JOIN (
+                SELECT kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'UNIQUE'
+                    AND tc.table_schema = 'public'
+                    AND tc.table_name = $1
+            ) uq ON c.column_name = uq.column_name
             WHERE c.table_schema = 'public'
                 AND c.table_name = $1
             ORDER BY c.ordinal_position
@@ -110,6 +121,8 @@ export class PostgreSQLSchemaProvider implements SchemaProvider {
                 keyType = 'PRIMARY';
             } else if (row.foreign_table_name) {
                 keyType = 'FOREIGN';
+            } else if (row.is_unique_key && row.is_nullable !== 'YES') {
+                keyType = 'UNIQUE';
             }
 
             // Use udt_name for more readable types (e.g. "int4" instead of "integer")
@@ -245,5 +258,170 @@ export class PostgreSQLSchemaProvider implements SchemaProvider {
                 signal.removeEventListener('abort', abortHandler);
             }
         }
+    }
+
+    async updateCell(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string,
+        primaryKeys: Record<string, unknown>,
+        columnName: string,
+        newValue: unknown
+    ): Promise<UpdateCellResult> {
+        try {
+            const connection = await pool.getConnection(config) as PgClient;
+            const escapedTable = escapeIdentifier(tableName);
+            const escapedColumn = escapeIdentifier(columnName);
+
+            const pkEntries = Object.entries(primaryKeys);
+            let paramIdx = 1;
+            const setClause = `${escapedColumn} = $${paramIdx++}`;
+            const whereClauses = pkEntries.map(([key]) => `${escapeIdentifier(key)} = $${paramIdx++}`);
+            const params = [newValue, ...pkEntries.map(([, val]) => val)];
+
+            const sql = `UPDATE ${escapedTable} SET ${setClause} WHERE ${whereClauses.join(' AND ')} RETURNING *`;
+            const result = await connection.query(sql, params);
+
+            if (result.rows.length > 0) {
+                const columns = result.fields.map(f => f.name);
+                const updatedRow = columns.map(col => result.rows[0][col]);
+                return { success: true, updatedRow };
+            }
+
+            return { success: true };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    }
+
+    async insertRow(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string,
+        values: Record<string, unknown>
+    ): Promise<InsertRowResult> {
+        try {
+            const connection = await pool.getConnection(config) as PgClient;
+            const escapedTable = escapeIdentifier(tableName);
+
+            const entries = Object.entries(values);
+            let sql: string;
+            let params: unknown[];
+
+            if (entries.length === 0) {
+                sql = `INSERT INTO ${escapedTable} DEFAULT VALUES RETURNING *`;
+                params = [];
+            } else {
+                const columns = entries.map(([key]) => escapeIdentifier(key));
+                const placeholders = entries.map((_, i) => `$${i + 1}`);
+                params = entries.map(([, val]) => val);
+                sql = `INSERT INTO ${escapedTable} (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING *`;
+            }
+
+            const result = await connection.query(sql, params);
+
+            if (result.rows.length > 0) {
+                const columns = result.fields.map(f => f.name);
+                return { success: true, newRow: columns.map(col => result.rows[0][col]) };
+            }
+
+            return { success: true };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    }
+
+    async deleteRow(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string,
+        primaryKeys: Record<string, unknown>
+    ): Promise<DeleteRowResult> {
+        try {
+            const connection = await pool.getConnection(config) as PgClient;
+            const escapedTable = escapeIdentifier(tableName);
+
+            const pkEntries = Object.entries(primaryKeys);
+            const whereClauses = pkEntries.map(([key], i) => `${escapeIdentifier(key)} = $${i + 1}`);
+            const params = pkEntries.map(([, val]) => val);
+
+            const sql = `DELETE FROM ${escapedTable} WHERE ${whereClauses.join(' AND ')}`;
+            await connection.query(sql, params);
+
+            return { success: true };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    }
+
+    async getTableDDL(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string
+    ): Promise<string> {
+        const connection = await pool.getConnection(config) as PgClient;
+        const qualifiedName = `public.${escapeIdentifier(tableName)}`;
+
+        // Query 1: Columns — name, type, nullability, defaults
+        const columnsResult = await connection.query(
+            `SELECT
+                a.attname AS column_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                a.attnotnull AS not_null,
+                pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default_value
+            FROM pg_catalog.pg_attribute a
+            LEFT JOIN pg_catalog.pg_attrdef d
+                ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+            WHERE a.attrelid = $1::regclass
+                AND a.attnum > 0
+                AND NOT a.attisdropped
+            ORDER BY a.attnum`,
+            [qualifiedName]
+        );
+
+        if (columnsResult.rows.length === 0) {
+            throw new Error(`Table "${tableName}" not found or has no columns`);
+        }
+
+        // Query 2: Constraints — PK, UNIQUE, FK, CHECK
+        const constraintsResult = await connection.query(
+            `SELECT
+                conname AS constraint_name,
+                pg_catalog.pg_get_constraintdef(c.oid, true) AS constraint_def
+            FROM pg_catalog.pg_constraint c
+            WHERE c.conrelid = $1::regclass
+            ORDER BY
+                CASE c.contype
+                    WHEN 'p' THEN 0
+                    WHEN 'u' THEN 1
+                    WHEN 'f' THEN 2
+                    WHEN 'c' THEN 3
+                    ELSE 4
+                END`,
+            [qualifiedName]
+        );
+
+        // Assemble DDL
+        const parts: string[] = [];
+
+        for (const row of columnsResult.rows) {
+            let colDef = `    ${escapeIdentifier(row.column_name)} ${row.data_type}`;
+            if (row.not_null) {
+                colDef += ' NOT NULL';
+            }
+            if (row.default_value !== null) {
+                colDef += ` DEFAULT ${row.default_value}`;
+            }
+            parts.push(colDef);
+        }
+
+        for (const row of constraintsResult.rows) {
+            parts.push(`    CONSTRAINT ${escapeIdentifier(row.constraint_name)} ${row.constraint_def}`);
+        }
+
+        return `CREATE TABLE ${escapeIdentifier(tableName)} (\n${parts.join(',\n')}\n);`;
     }
 }

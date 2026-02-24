@@ -1,7 +1,27 @@
 import * as vscode from 'vscode';
 import { ConnectionConfig } from '../models/connection';
 import { TableInfo } from '../models/table';
-import { QueryResult, SortOptions, SortDirection, QueryExecutionResult } from '../providers/schema-provider';
+import { ColumnInfo } from '../models/column';
+import { QueryResult, SortOptions, SortDirection, QueryExecutionResult, UpdateCellResult, InsertRowResult, DeleteRowResult } from '../providers/schema-provider';
+
+export interface EditabilityInfo {
+    editable: boolean;
+    tableName: string;
+    identifyingColumns: string[];
+    columnMetadata: Array<{
+        name: string;
+        dataType: string;
+        nullable: boolean;
+        keyType: 'PRIMARY' | 'UNIQUE' | 'FOREIGN' | null;
+    }>;
+    reason?: string;
+}
+
+export interface MutationCallbacks {
+    updateCell(tableName: string, primaryKeys: Record<string, unknown>, columnName: string, newValue: unknown): Promise<UpdateCellResult>;
+    insertRow(tableName: string, values: Record<string, unknown>): Promise<InsertRowResult>;
+    deleteRow(tableName: string, primaryKeys: Record<string, unknown>): Promise<DeleteRowResult>;
+}
 
 function getNonce(): string {
     let text = '';
@@ -29,6 +49,8 @@ export class TableDataPanel {
     private getData: ((sort?: SortOptions) => Promise<QueryResult>) | null = null;
     private webviewReady = false;
     private pendingMessages: object[] = [];
+    private editabilityInfo: EditabilityInfo | null = null;
+    private mutationCallbacks: MutationCallbacks | null = null;
 
     private constructor(
         panel: vscode.WebviewPanel,
@@ -67,6 +89,14 @@ export class TableDataPanel {
                     this.sortColumn = message.column;
                     this.sortDirection = message.direction;
                     await this.loadData(true);
+                } else if (message.command === 'updateCell') {
+                    await this.handleUpdateCell(message);
+                } else if (message.command === 'deleteRow') {
+                    await this.handleDeleteRow(message);
+                } else if (message.command === 'insertRow') {
+                    await this.handleInsertRow(message);
+                } else if (message.command === 'cloneRow') {
+                    await this.handleCloneRow(message);
                 }
                 // Query mode sorting is handled client-side in the webview
             },
@@ -82,12 +112,14 @@ export class TableDataPanel {
         connection: ConnectionConfig,
         table: TableInfo,
         getData: (sort?: SortOptions) => Promise<QueryResult>,
+        editabilityInfo?: EditabilityInfo,
+        mutationCallbacks?: MutationCallbacks,
     ): void {
         const column = vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One;
 
         if (TableDataPanel.instance) {
             TableDataPanel.instance.panel.reveal(column);
-            TableDataPanel.instance.updateForTableData(connection, table, getData);
+            TableDataPanel.instance.updateForTableData(connection, table, getData, editabilityInfo, mutationCallbacks);
             return;
         }
 
@@ -109,6 +141,8 @@ export class TableDataPanel {
 
         TableDataPanel.instance = new TableDataPanel(panel, config);
         TableDataPanel.instance.getData = getData;
+        TableDataPanel.instance.editabilityInfo = editabilityInfo || null;
+        TableDataPanel.instance.mutationCallbacks = mutationCallbacks || null;
         TableDataPanel.instance.loadData();
     }
 
@@ -160,9 +194,16 @@ export class TableDataPanel {
         });
     }
 
-    showResult(result: QueryExecutionResult): void {
+    showResult(result: QueryExecutionResult, editabilityInfo?: EditabilityInfo, mutationCallbacks?: MutationCallbacks): void {
+        if (editabilityInfo) {
+            this.editabilityInfo = editabilityInfo;
+        }
+        if (mutationCallbacks) {
+            this.mutationCallbacks = mutationCallbacks;
+        }
+
         if (result.type === 'select' && result.columns && result.rows) {
-            this.postMessage({
+            const dataMessage: Record<string, unknown> = {
                 command: 'data',
                 columns: result.columns,
                 rows: result.rows,
@@ -170,7 +211,15 @@ export class TableDataPanel {
                 executionTime: result.executionTimeMs,
                 truncated: result.truncated,
                 affectedRows: null,
-            });
+            };
+            if (this.editabilityInfo) {
+                dataMessage.editable = this.editabilityInfo.editable;
+                dataMessage.identifyingColumns = this.editabilityInfo.identifyingColumns;
+                dataMessage.columnMetadata = this.editabilityInfo.columnMetadata;
+                dataMessage.editabilityReason = this.editabilityInfo.reason;
+                dataMessage.tableName = this.editabilityInfo.tableName;
+            }
+            this.postMessage(dataMessage);
         } else {
             // INSERT/UPDATE/DELETE result
             this.postMessage({
@@ -208,6 +257,8 @@ export class TableDataPanel {
         connection: ConnectionConfig,
         table: TableInfo,
         getData: (sort?: SortOptions) => Promise<QueryResult>,
+        editabilityInfo?: EditabilityInfo,
+        mutationCallbacks?: MutationCallbacks,
     ): void {
         this.config = {
             title: table.name,
@@ -215,6 +266,8 @@ export class TableDataPanel {
             mode: 'table',
         };
         this.getData = getData;
+        this.editabilityInfo = editabilityInfo || null;
+        this.mutationCallbacks = mutationCallbacks || null;
         this.sortColumn = null;
         this.sortDirection = null;
         this.panel.title = `${table.name} - ${connection.name}`;
@@ -235,16 +288,126 @@ export class TableDataPanel {
                 ? { column: this.sortColumn, direction: this.sortDirection }
                 : undefined;
             const result = await this.getData(sort);
-            this.postMessage({
+            const dataMessage: Record<string, unknown> = {
                 command: 'data',
                 columns: result.columns,
                 rows: result.rows,
                 query: result.query,
                 sort: sort ? { column: sort.column, direction: sort.direction } : null,
-            });
+            };
+            if (this.editabilityInfo) {
+                dataMessage.editable = this.editabilityInfo.editable;
+                dataMessage.identifyingColumns = this.editabilityInfo.identifyingColumns;
+                dataMessage.columnMetadata = this.editabilityInfo.columnMetadata;
+                dataMessage.editabilityReason = this.editabilityInfo.reason;
+                dataMessage.tableName = this.editabilityInfo.tableName;
+            }
+            this.postMessage(dataMessage);
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to load data';
             this.postMessage({ command: 'error', message });
+        }
+    }
+
+    private async handleUpdateCell(message: { column: string; value: unknown; primaryKeys: Record<string, unknown>; rowIndex: number }): Promise<void> {
+        if (!this.mutationCallbacks || !this.editabilityInfo) {
+            this.postMessage({ command: 'cellUpdateResult', success: false, error: 'Editing not available', column: message.column, rowIndex: message.rowIndex });
+            return;
+        }
+        const result = await this.mutationCallbacks.updateCell(
+            this.editabilityInfo.tableName,
+            message.primaryKeys,
+            message.column,
+            message.value
+        );
+        this.postMessage({
+            command: 'cellUpdateResult',
+            success: result.success,
+            column: message.column,
+            rowIndex: message.rowIndex,
+            updatedRow: result.updatedRow,
+            error: result.error,
+        });
+        if (!result.success && result.error) {
+            vscode.window.showErrorMessage(`Update failed: ${result.error}`);
+        }
+    }
+
+    private async handleDeleteRow(message: { primaryKeys: Record<string, unknown>; rowIndex: number }): Promise<void> {
+        if (!this.mutationCallbacks || !this.editabilityInfo) {
+            this.postMessage({ command: 'deleteRowResult', success: false, error: 'Editing not available', rowIndex: message.rowIndex });
+            return;
+        }
+
+        const confirm = await vscode.window.showWarningMessage(
+            'Delete this row?',
+            { modal: true },
+            'Delete',
+        );
+        if (confirm !== 'Delete') {
+            return;
+        }
+
+        const result = await this.mutationCallbacks.deleteRow(
+            this.editabilityInfo.tableName,
+            message.primaryKeys
+        );
+        this.postMessage({
+            command: 'deleteRowResult',
+            success: result.success,
+            rowIndex: message.rowIndex,
+            error: result.error,
+        });
+        if (!result.success && result.error) {
+            vscode.window.showErrorMessage(`Delete failed: ${result.error}`);
+        }
+    }
+
+    private async handleInsertRow(message: { values: Record<string, unknown> }): Promise<void> {
+        if (!this.mutationCallbacks || !this.editabilityInfo) {
+            this.postMessage({ command: 'insertRowResult', success: false, error: 'Editing not available' });
+            return;
+        }
+        const result = await this.mutationCallbacks.insertRow(
+            this.editabilityInfo.tableName,
+            message.values
+        );
+        this.postMessage({
+            command: 'insertRowResult',
+            success: result.success,
+            newRow: result.newRow,
+            error: result.error,
+        });
+        if (!result.success && result.error) {
+            vscode.window.showErrorMessage(`Insert failed: ${result.error}`);
+        }
+    }
+
+    private async handleCloneRow(message: { values: Record<string, unknown>; primaryKeys: Record<string, unknown> }): Promise<void> {
+        if (!this.mutationCallbacks || !this.editabilityInfo) {
+            this.postMessage({ command: 'insertRowResult', success: false, error: 'Editing not available' });
+            return;
+        }
+        // Clone: insert with all non-identifying-column values from the source row
+        const identifyingCols = new Set(this.editabilityInfo.identifyingColumns);
+        const cloneValues: Record<string, unknown> = {};
+        for (const [key, val] of Object.entries(message.values)) {
+            if (!identifyingCols.has(key)) {
+                cloneValues[key] = val;
+            }
+        }
+        const result = await this.mutationCallbacks.insertRow(
+            this.editabilityInfo.tableName,
+            cloneValues
+        );
+        this.postMessage({
+            command: 'insertRowResult',
+            success: result.success,
+            newRow: result.newRow,
+            error: result.error,
+        });
+        if (!result.success && result.error) {
+            vscode.window.showErrorMessage(`Clone failed: ${result.error}`);
         }
     }
 
@@ -558,6 +721,227 @@ export class TableDataPanel {
         .truncation-notice .info-icon {
             opacity: 0.6;
         }
+        /* Edit mode styles */
+        .lock-toggle {
+            background: none;
+            border: 1px solid var(--vscode-input-border);
+            color: var(--vscode-foreground);
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            white-space: nowrap;
+        }
+        .lock-toggle:hover {
+            background-color: var(--vscode-list-hoverBackground);
+        }
+        .lock-toggle.hidden {
+            display: none;
+        }
+        .editability-hint {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            white-space: nowrap;
+        }
+        .editability-hint.hidden {
+            display: none;
+        }
+        .add-row-btn {
+            background: none;
+            border: 1px solid var(--vscode-input-border);
+            color: var(--vscode-foreground);
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        .add-row-btn:hover {
+            background-color: var(--vscode-list-hoverBackground);
+        }
+        .add-row-btn.hidden {
+            display: none;
+        }
+        /* Gutter column */
+        .gutter-col {
+            width: 40px;
+            min-width: 40px;
+            max-width: 40px;
+            padding: 4px !important;
+            text-align: center;
+            border-right: 1px solid var(--vscode-widget-border, var(--vscode-input-border));
+        }
+        .gutter-col.hidden-gutter {
+            display: none;
+        }
+        .gutter-actions {
+            display: flex;
+            gap: 2px;
+            justify-content: center;
+            opacity: 0;
+        }
+        tr:hover .gutter-actions {
+            opacity: 1;
+        }
+        .gutter-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 2px;
+            font-size: 12px;
+            color: var(--vscode-descriptionForeground);
+            border-radius: 3px;
+            line-height: 1;
+        }
+        .gutter-btn:hover {
+            background-color: var(--vscode-list-hoverBackground);
+            color: var(--vscode-foreground);
+        }
+        .gutter-btn.delete-btn:hover {
+            color: var(--vscode-errorForeground);
+        }
+        /* Cell edit icon & editing */
+        td {
+            position: relative;
+        }
+        .edit-icon {
+            display: none;
+            position: absolute;
+            right: 4px;
+            top: 50%;
+            transform: translateY(-50%);
+            cursor: pointer;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            background: var(--vscode-editor-background);
+            padding: 1px 3px;
+            border-radius: 3px;
+            border: 1px solid var(--vscode-widget-border, var(--vscode-input-border));
+            z-index: 2;
+        }
+        tr:hover .edit-icon {
+            display: inline-block;
+        }
+        .cell-editing {
+            padding: 2px 4px !important;
+        }
+        .cell-editor-wrap {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .cell-input {
+            flex: 1;
+            min-width: 60px;
+            padding: 3px 6px;
+            border: 1px solid var(--vscode-focusBorder);
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            font-family: inherit;
+            font-size: 13px;
+            border-radius: 3px;
+            outline: none;
+        }
+        .cell-input:focus {
+            border-color: var(--vscode-focusBorder);
+        }
+        .null-toggle {
+            font-size: 9px;
+            padding: 2px 4px;
+            cursor: pointer;
+            background: none;
+            border: 1px solid var(--vscode-input-border);
+            color: var(--vscode-descriptionForeground);
+            border-radius: 3px;
+            white-space: nowrap;
+            line-height: 1;
+        }
+        .null-toggle:hover {
+            background-color: var(--vscode-list-hoverBackground);
+        }
+        .null-toggle.active {
+            background-color: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+        }
+        .cell-checkbox {
+            cursor: pointer;
+            width: 16px;
+            height: 16px;
+        }
+        .cell-textarea-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 100;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-focusBorder);
+            border-radius: 4px;
+            padding: 6px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            min-width: 250px;
+            min-height: 100px;
+        }
+        .cell-textarea {
+            width: 100%;
+            min-height: 80px;
+            padding: 4px;
+            border: 1px solid var(--vscode-input-border);
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 12px;
+            border-radius: 3px;
+            resize: both;
+        }
+        .textarea-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 4px;
+            justify-content: flex-end;
+        }
+        .textarea-btn {
+            padding: 3px 10px;
+            border: 1px solid var(--vscode-input-border);
+            background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+            color: var(--vscode-foreground);
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .textarea-btn.save {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border-color: var(--vscode-button-background);
+        }
+        /* Flash animations */
+        @keyframes flash-success {
+            0% { background-color: rgba(137, 209, 133, 0.3); }
+            100% { background-color: transparent; }
+        }
+        @keyframes flash-error {
+            0% { background-color: rgba(255, 85, 85, 0.3); }
+            100% { background-color: transparent; }
+        }
+        @keyframes fade-out {
+            0% { opacity: 1; }
+            100% { opacity: 0; height: 0; padding: 0; overflow: hidden; }
+        }
+        .flash-success {
+            animation: flash-success 1s ease-out;
+        }
+        .flash-error {
+            animation: flash-error 1.5s ease-out;
+        }
+        .fade-out {
+            animation: fade-out 0.3s ease-out forwards;
+        }
+        .cell-loading {
+            color: var(--vscode-descriptionForeground);
+            font-style: italic;
+        }
     </style>
 </head>
 <body>
@@ -571,6 +955,9 @@ export class TableDataPanel {
             <input type="text" id="searchInput" class="search-input" placeholder="Filter rows..." disabled>
         </div>
         <span class="search-hint">Local filter only</span>
+        <button id="lockToggle" class="lock-toggle hidden" title="Toggle edit mode">&#128274; Read-only</button>
+        <span id="editabilityHint" class="editability-hint hidden"></span>
+        <button id="addRowBtn" class="add-row-btn hidden" title="Add new row">+ Add Row</button>
         <span id="executionTime" class="execution-time"></span>
         <span id="rowCount" class="row-count"></span>
     </div>
@@ -599,6 +986,9 @@ export class TableDataPanel {
 
         const vscode = acquireVsCodeApi();
         const isQueryMode = ${isQueryMode};
+        const lockToggle = document.getElementById('lockToggle');
+        const editabilityHint = document.getElementById('editabilityHint');
+        const addRowBtn = document.getElementById('addRowBtn');
 
         // Signal the extension that the webview JS is ready to receive messages
         vscode.postMessage({ command: 'ready' });
@@ -611,6 +1001,331 @@ export class TableDataPanel {
         let columnWidths = {};
         let currentSortColumn = null;
         let currentSortDirection = null;
+
+        // Editing state
+        let isEditable = false;
+        let isReadOnly = true; // Default locked
+        let identifyingColumns = [];
+        let columnMetadata = [];
+        let editingCell = null; // { rowIndex, colIndex }
+        let editTableName = '';
+
+        function valueToString(val) {
+            if (val === null || val === undefined) return '';
+            if (typeof val === 'object' && !(val instanceof Date)) {
+                try { return JSON.stringify(val); } catch { return String(val); }
+            }
+            return String(val);
+        }
+
+        function getEditorType(dataType) {
+            if (!dataType) return 'text';
+            const dt = dataType.toLowerCase();
+            if (dt === 'bool' || dt === 'boolean' || dt === 'tinyint(1)') return 'checkbox';
+            if (dt === 'date') return 'date';
+            if (dt.includes('datetime') || dt.includes('timestamp')) return 'datetime';
+            if (dt.includes('text') || dt.includes('json') || dt === 'jsonb') return 'textarea';
+            if (dt.includes('blob') || dt.includes('bytea') || dt.includes('binary')) return 'disabled';
+            return 'text';
+        }
+
+        function isBinaryColumn(colIndex) {
+            const meta = columnMetadata[colIndex];
+            return meta && getEditorType(meta.dataType) === 'disabled';
+        }
+
+        function getColumnMeta(colIndex) {
+            const colName = allColumns[colIndex];
+            return columnMetadata.find(m => m.name === colName);
+        }
+
+        function getPrimaryKeyValues(rowIndex) {
+            const row = allRows[rowIndex];
+            if (!row) return null;
+            const pks = {};
+            for (const pkCol of identifyingColumns) {
+                const idx = allColumns.indexOf(pkCol);
+                if (idx === -1) return null;
+                pks[pkCol] = row[idx];
+            }
+            return pks;
+        }
+
+        function getRowValues(rowIndex) {
+            const row = allRows[rowIndex];
+            if (!row) return {};
+            const vals = {};
+            allColumns.forEach((col, i) => { vals[col] = row[i]; });
+            return vals;
+        }
+
+        // Lock toggle
+        lockToggle.addEventListener('click', () => {
+            isReadOnly = !isReadOnly;
+            lockToggle.innerHTML = isReadOnly ? '&#128274; Read-only' : '&#128275; Editing';
+            lockToggle.title = isReadOnly ? 'Click to enable editing' : 'Click to enable read-only mode';
+            addRowBtn.classList.toggle('hidden', isReadOnly || !isEditable);
+            if (isReadOnly && editingCell) {
+                cancelEdit();
+            }
+            renderFilteredTable(searchInput.value.trim());
+        });
+
+        // Add Row
+        addRowBtn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'insertRow', values: {} });
+        });
+
+        function showEditControls() {
+            if (isEditable) {
+                lockToggle.classList.remove('hidden');
+                editabilityHint.classList.add('hidden');
+            } else {
+                lockToggle.classList.add('hidden');
+                if (editabilityHint.textContent) {
+                    editabilityHint.classList.remove('hidden');
+                }
+            }
+            addRowBtn.classList.toggle('hidden', isReadOnly || !isEditable);
+        }
+
+        function enterEditMode(rowIndex, colIndex) {
+            if (isReadOnly || !isEditable) return;
+            if (isBinaryColumn(colIndex)) return;
+
+            const meta = getColumnMeta(colIndex);
+            if (!meta) return;
+
+            // Cancel any existing edit
+            if (editingCell) cancelEdit();
+
+            editingCell = { rowIndex, colIndex };
+            const td = getCell(rowIndex, colIndex);
+            if (!td) return;
+
+            const currentValue = allRows[rowIndex][colIndex];
+            const editorType = getEditorType(meta.dataType);
+
+            td.classList.add('cell-editing');
+
+            if (editorType === 'checkbox') {
+                const newVal = !(currentValue === true || currentValue === 1 || currentValue === '1');
+                commitEdit(rowIndex, colIndex, newVal);
+                editingCell = null;
+                return;
+            }
+
+            if (editorType === 'textarea') {
+                renderTextareaEditor(td, rowIndex, colIndex, currentValue, meta);
+                return;
+            }
+
+            const wrap = document.createElement('div');
+            wrap.className = 'cell-editor-wrap';
+
+            const input = document.createElement('input');
+            input.className = 'cell-input';
+            input.type = editorType === 'date' ? 'date' : editorType === 'datetime' ? 'datetime-local' : 'text';
+
+            if (currentValue !== null && currentValue !== undefined) {
+                if (editorType === 'date' && currentValue instanceof Date) {
+                    input.value = currentValue.toISOString().slice(0, 10);
+                } else if (editorType === 'datetime' && currentValue instanceof Date) {
+                    input.value = currentValue.toISOString().slice(0, 16);
+                } else {
+                    input.value = valueToString(currentValue);
+                }
+            }
+
+            let isNull = currentValue === null;
+
+            // NULL toggle for nullable columns
+            if (meta.nullable) {
+                const nullBtn = document.createElement('button');
+                nullBtn.className = 'null-toggle' + (isNull ? ' active' : '');
+                nullBtn.textContent = 'NULL';
+                nullBtn.title = isNull ? 'Unset NULL' : 'Set to NULL';
+                nullBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (isNull) {
+                        isNull = false;
+                        nullBtn.classList.remove('active');
+                        input.disabled = false;
+                        input.value = '';
+                        input.focus();
+                    } else {
+                        isNull = true;
+                        nullBtn.classList.add('active');
+                        input.disabled = true;
+                        input.value = '';
+                        input.placeholder = 'NULL';
+                        commitEdit(rowIndex, colIndex, null);
+                        editingCell = null;
+                    }
+                });
+                wrap.appendChild(nullBtn);
+            }
+
+            if (isNull) {
+                input.disabled = true;
+                input.placeholder = 'NULL';
+            }
+
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const val = isNull ? null : input.value;
+                    commitEdit(rowIndex, colIndex, val);
+                    editingCell = null;
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelEdit();
+                } else if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const val = isNull ? null : input.value;
+                    commitEdit(rowIndex, colIndex, val);
+                    editingCell = null;
+                    // Move to next editable cell
+                    const nextCol = colIndex + 1 < allColumns.length ? colIndex + 1 : 0;
+                    const nextRow = nextCol === 0 ? rowIndex + 1 : rowIndex;
+                    if (nextRow < allRows.length) {
+                        setTimeout(() => enterEditMode(nextRow, nextCol), 50);
+                    }
+                }
+            });
+
+            input.addEventListener('blur', (e) => {
+                // Delay to allow null toggle click
+                setTimeout(() => {
+                    if (editingCell && editingCell.rowIndex === rowIndex && editingCell.colIndex === colIndex) {
+                        const val = isNull ? null : input.value;
+                        commitEdit(rowIndex, colIndex, val);
+                        editingCell = null;
+                    }
+                }, 150);
+            });
+
+            wrap.insertBefore(input, wrap.firstChild);
+            td.innerHTML = '';
+            td.appendChild(wrap);
+            input.focus();
+            input.select();
+        }
+
+        function renderTextareaEditor(td, rowIndex, colIndex, currentValue, meta) {
+            const overlay = document.createElement('div');
+            overlay.className = 'cell-textarea-overlay';
+
+            const textarea = document.createElement('textarea');
+            textarea.className = 'cell-textarea';
+            textarea.value = currentValue !== null && currentValue !== undefined ? valueToString(currentValue) : '';
+
+            const actions = document.createElement('div');
+            actions.className = 'textarea-actions';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.className = 'textarea-btn';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.addEventListener('click', () => { cancelEdit(); });
+
+            const saveBtn = document.createElement('button');
+            saveBtn.className = 'textarea-btn save';
+            saveBtn.textContent = 'Save (Ctrl+Enter)';
+            saveBtn.addEventListener('click', () => {
+                commitEdit(rowIndex, colIndex, textarea.value);
+                editingCell = null;
+            });
+
+            textarea.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && e.ctrlKey) {
+                    e.preventDefault();
+                    commitEdit(rowIndex, colIndex, textarea.value);
+                    editingCell = null;
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelEdit();
+                }
+            });
+
+            actions.appendChild(cancelBtn);
+            actions.appendChild(saveBtn);
+            overlay.appendChild(textarea);
+            overlay.appendChild(actions);
+
+            // Position near the cell
+            td.style.position = 'relative';
+            td.innerHTML = '';
+            td.appendChild(overlay);
+            textarea.focus();
+        }
+
+        function cancelEdit() {
+            if (!editingCell) return;
+            const { rowIndex, colIndex } = editingCell;
+            editingCell = null;
+            const td = getCell(rowIndex, colIndex);
+            if (td) {
+                td.classList.remove('cell-editing');
+                const searchTerm = searchInput.value.trim();
+                td.innerHTML = formatCellContent(allRows[rowIndex][colIndex], colIndex, rowIndex, searchTerm);
+            }
+        }
+
+        function commitEdit(rowIndex, colIndex, newValue) {
+            const colName = allColumns[colIndex];
+            const originalValue = allRows[rowIndex][colIndex];
+
+            // No-op if value unchanged
+            if (newValue === originalValue || (newValue === '' && originalValue === '') ||
+                (String(newValue) === String(originalValue) && newValue !== null && originalValue !== null)) {
+                cancelEdit();
+                return;
+            }
+
+            const pks = getPrimaryKeyValues(rowIndex);
+            if (!pks) return;
+
+            // Show loading
+            const td = getCell(rowIndex, colIndex);
+            if (td) {
+                td.innerHTML = '<span class="cell-loading">Saving...</span>';
+            }
+
+            vscode.postMessage({
+                command: 'updateCell',
+                column: colName,
+                value: newValue,
+                primaryKeys: pks,
+                rowIndex: rowIndex
+            });
+        }
+
+        function getCell(rowIndex, colIndex) {
+            const table = contentDiv.querySelector('table');
+            if (!table) return null;
+            const gutterOffset = (!isReadOnly && isEditable) ? 1 : 0;
+            const rows = table.querySelectorAll('tbody tr');
+            if (!rows[rowIndex]) return null;
+            return rows[rowIndex].children[colIndex + gutterOffset] || null;
+        }
+
+        function flashCell(rowIndex, colIndex, type) {
+            const td = getCell(rowIndex, colIndex);
+            if (!td) return;
+            td.classList.add(type === 'success' ? 'flash-success' : 'flash-error');
+            setTimeout(() => {
+                td.classList.remove('flash-success', 'flash-error');
+            }, 1500);
+        }
+
+        function formatCellContent(cell, colIndex, rowIndex, searchTerm) {
+            const showEditIcon = isEditable && !isReadOnly && !isBinaryColumn(colIndex);
+            let content = formatValue(cell, searchTerm);
+            if (showEditIcon) {
+                content += '<span class="edit-icon" data-row="' + rowIndex + '" data-col="' + colIndex + '" title="Edit">&#9998;</span>';
+            }
+            return content;
+        }
 
         // Query display toggle functionality
         function normalizeQuery(query) {
@@ -788,6 +1503,13 @@ export class TableDataPanel {
 
         function renderFilteredTable(searchTerm = '') {
             const filteredRows = allRows.filter(row => rowMatchesSearch(row, searchTerm));
+            // Build index map from filtered rows back to allRows
+            const filteredIndices = [];
+            for (let i = 0; i < allRows.length; i++) {
+                if (rowMatchesSearch(allRows[i], searchTerm)) {
+                    filteredIndices.push(i);
+                }
+            }
 
             if (filteredRows.length === 0 && searchTerm) {
                 rowCountDiv.textContent = '0 of ' + totalRows + ' rows';
@@ -802,8 +1524,12 @@ export class TableDataPanel {
                 rowCountDiv.textContent = totalRows + ' row' + (totalRows === 1 ? '' : 's') + limitNote;
             }
 
+            const showGutter = isEditable && !isReadOnly;
             const sortTooltip = isQueryMode ? 'Click to sort locally' : 'Click to sort';
             let html = '<table><thead><tr>';
+            if (showGutter) {
+                html += '<th class="gutter-col"></th>';
+            }
             allColumns.forEach((col, i) => {
                 const width = columnWidths[i] || 150;
                 const sortArrows = getSortArrows(col);
@@ -816,11 +1542,18 @@ export class TableDataPanel {
             });
             html += '</tr></thead><tbody>';
 
-            filteredRows.forEach(row => {
-                html += '<tr>';
+            filteredRows.forEach((row, fi) => {
+                const realIndex = filteredIndices[fi];
+                html += '<tr data-row="' + realIndex + '">';
+                if (showGutter) {
+                    html += '<td class="gutter-col"><div class="gutter-actions">' +
+                        '<button class="gutter-btn delete-btn" data-row="' + realIndex + '" title="Delete row">&#128465;</button>' +
+                        '<button class="gutter-btn clone-btn" data-row="' + realIndex + '" title="Clone row">&#128203;</button>' +
+                        '</div></td>';
+                }
                 row.forEach((cell, i) => {
                     const width = columnWidths[i] || 150;
-                    html += '<td style="max-width: ' + width + 'px;">' + formatValue(cell, searchTerm) + '</td>';
+                    html += '<td style="max-width: ' + width + 'px;">' + formatCellContent(cell, i, realIndex, searchTerm) + '</td>';
                 });
                 html += '</tr>';
             });
@@ -830,6 +1563,42 @@ export class TableDataPanel {
 
             setupColumnResizing();
             setupColumnSorting();
+            setupEditHandlers();
+        }
+
+        function setupEditHandlers() {
+            // Edit icon click
+            contentDiv.querySelectorAll('.edit-icon').forEach(icon => {
+                icon.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const row = parseInt(icon.getAttribute('data-row'));
+                    const col = parseInt(icon.getAttribute('data-col'));
+                    enterEditMode(row, col);
+                });
+            });
+            // Gutter delete
+            contentDiv.querySelectorAll('.delete-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const rowIdx = parseInt(btn.getAttribute('data-row'));
+                    const pks = getPrimaryKeyValues(rowIdx);
+                    if (pks) {
+                        vscode.postMessage({ command: 'deleteRow', primaryKeys: pks, rowIndex: rowIdx });
+                    }
+                });
+            });
+            // Gutter clone
+            contentDiv.querySelectorAll('.clone-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const rowIdx = parseInt(btn.getAttribute('data-row'));
+                    const pks = getPrimaryKeyValues(rowIdx);
+                    const vals = getRowValues(rowIdx);
+                    if (pks) {
+                        vscode.postMessage({ command: 'cloneRow', values: vals, primaryKeys: pks });
+                    }
+                });
+            });
         }
 
         function setupColumnSorting() {
@@ -924,6 +1693,20 @@ export class TableDataPanel {
                     } else {
                         truncationNotice.classList.add('hidden');
                     }
+                    // Process editability info
+                    isEditable = message.editable || false;
+                    identifyingColumns = message.identifyingColumns || [];
+                    columnMetadata = message.columnMetadata || [];
+                    editTableName = message.tableName || '';
+                    isReadOnly = true; // Reset to locked on new data
+                    editingCell = null;
+                    if (!isEditable && message.editabilityReason) {
+                        editabilityHint.textContent = message.editabilityReason;
+                    } else {
+                        editabilityHint.textContent = '';
+                    }
+                    lockToggle.innerHTML = '&#128274; Read-only';
+                    showEditControls();
                     renderTable(message.columns, message.rows);
                     break;
                 case 'nonSelectResult':
@@ -954,6 +1737,73 @@ export class TableDataPanel {
                     contentDiv.innerHTML = '<div class="cancelled-message">Query cancelled</div>';
                     searchInput.disabled = true;
                     break;
+                case 'cellUpdateResult': {
+                    const ri = message.rowIndex;
+                    const ci = allColumns.indexOf(message.column);
+                    if (message.success) {
+                        if (message.updatedRow && allRows[ri]) {
+                            allRows[ri] = message.updatedRow;
+                            originalRows[ri] = [...message.updatedRow];
+                        }
+                        const td = getCell(ri, ci);
+                        if (td) {
+                            td.classList.remove('cell-editing');
+                            td.innerHTML = formatCellContent(allRows[ri][ci], ci, ri, searchInput.value.trim());
+                        }
+                        flashCell(ri, ci, 'success');
+                        setupEditHandlers();
+                    } else {
+                        // Revert cell
+                        const td = getCell(ri, ci);
+                        if (td) {
+                            td.classList.remove('cell-editing');
+                            td.innerHTML = formatCellContent(allRows[ri][ci], ci, ri, searchInput.value.trim());
+                        }
+                        flashCell(ri, ci, 'error');
+                        if (message.error) {
+                            td && (td.title = message.error);
+                        }
+                        setupEditHandlers();
+                    }
+                    break;
+                }
+                case 'deleteRowResult': {
+                    const dri = message.rowIndex;
+                    if (message.success) {
+                        // Remove row with animation
+                        const table = contentDiv.querySelector('table');
+                        if (table) {
+                            const rows = table.querySelectorAll('tbody tr');
+                            for (const tr of rows) {
+                                if (parseInt(tr.getAttribute('data-row')) === dri) {
+                                    tr.classList.add('fade-out');
+                                    setTimeout(() => {
+                                        allRows.splice(dri, 1);
+                                        originalRows.splice(dri, 1);
+                                        totalRows = allRows.length;
+                                        renderFilteredTable(searchInput.value.trim());
+                                    }, 300);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                case 'insertRowResult': {
+                    if (message.success && message.newRow) {
+                        allRows.push(message.newRow);
+                        originalRows.push([...message.newRow]);
+                        totalRows = allRows.length;
+                        renderFilteredTable(searchInput.value.trim());
+                        // Flash last row
+                        const lastIdx = allRows.length - 1;
+                        if (allColumns.length > 0) {
+                            flashCell(lastIdx, 0, 'success');
+                        }
+                    }
+                    break;
+                }
             }
         });
     </script>
@@ -969,4 +1819,49 @@ export class TableDataPanel {
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
     }
+}
+
+/**
+ * Builds editability info from column metadata.
+ * Precedence: PK columns > first UNIQUE NOT NULL constraint > non-editable.
+ */
+export function buildEditabilityInfo(
+    tableName: string,
+    columns: ColumnInfo[],
+    tableType: 'TABLE' | 'VIEW',
+    resultColumns?: string[],
+): EditabilityInfo {
+    if (tableType === 'VIEW') {
+        return { editable: false, tableName, identifyingColumns: [], columnMetadata: columns.map(c => ({ name: c.name, dataType: c.dataType, nullable: c.nullable, keyType: c.keyType })), reason: 'Editing unavailable: views are not editable' };
+    }
+
+    // Find PK columns first
+    const pkColumns = columns.filter(c => c.keyType === 'PRIMARY').map(c => c.name);
+    // Fall back to UNIQUE NOT NULL columns
+    const uniqueColumns = columns.filter(c => c.keyType === 'UNIQUE').map(c => c.name);
+
+    let identifyingColumns: string[];
+    if (pkColumns.length > 0) {
+        identifyingColumns = pkColumns;
+    } else if (uniqueColumns.length > 0) {
+        identifyingColumns = uniqueColumns;
+    } else {
+        return { editable: false, tableName, identifyingColumns: [], columnMetadata: columns.map(c => ({ name: c.name, dataType: c.dataType, nullable: c.nullable, keyType: c.keyType })), reason: 'Editing unavailable: no primary key or unique constraint' };
+    }
+
+    // If result columns provided, check all identifying columns are present
+    if (resultColumns) {
+        const resultColSet = new Set(resultColumns);
+        const missingCols = identifyingColumns.filter(c => !resultColSet.has(c));
+        if (missingCols.length > 0) {
+            return { editable: false, tableName, identifyingColumns, columnMetadata: columns.map(c => ({ name: c.name, dataType: c.dataType, nullable: c.nullable, keyType: c.keyType })), reason: 'Editing unavailable: identifying columns missing from result set' };
+        }
+    }
+
+    return {
+        editable: true,
+        tableName,
+        identifyingColumns,
+        columnMetadata: columns.map(c => ({ name: c.name, dataType: c.dataType, nullable: c.nullable, keyType: c.keyType })),
+    };
 }

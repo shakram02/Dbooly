@@ -1,6 +1,6 @@
 import { ConnectionId } from './connection';
 
-export type KeyType = 'PRIMARY' | 'FOREIGN' | null;
+export type KeyType = 'PRIMARY' | 'UNIQUE' | 'FOREIGN' | null;
 
 export interface ForeignKeyRef {
     table: string;

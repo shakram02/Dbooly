@@ -1,9 +1,9 @@
-import { Database as SqlJsDatabase } from 'sql.js';
+import { Database as SqlJsDatabase, SqlValue } from 'sql.js';
 import { ConnectionConfigWithPassword } from '../models/connection';
 import { TableInfo, TableType } from '../models/table';
 import { ColumnInfo, KeyType } from '../models/column';
 import { ConnectionPool } from '../connections/connection-pool';
-import { SchemaProvider, QueryResult, SortOptions, QueryExecutionOptions, QueryExecutionResult, QueryType } from './schema-provider';
+import { SchemaProvider, QueryResult, SortOptions, QueryExecutionOptions, QueryExecutionResult, QueryType, UpdateCellResult, InsertRowResult, DeleteRowResult } from './schema-provider';
 
 /**
  * Detects the type of SQL query from the SQL string.
@@ -105,12 +105,42 @@ export class SQLiteSchemaProvider implements SchemaProvider {
             fkMap.set(fk.from, { table: fk.table, column: fk.to });
         }
 
+        // Get unique indexes to detect UNIQUE NOT NULL columns
+        const indexes = execToObjects<{
+            seq: number;
+            name: string;
+            unique: number;
+            origin: string;
+            partial: number;
+        }>(db, `PRAGMA index_list("${escapedTableName}")`);
+
+        const uniqueColumns = new Set<string>();
+        for (const idx of indexes) {
+            if (idx.unique === 1 && idx.origin !== 'pk') {
+                const indexInfo = execToObjects<{
+                    seqno: number;
+                    cid: number;
+                    name: string;
+                }>(db, `PRAGMA index_info("${idx.name.replace(/"/g, '""')}")`);
+
+                for (const col of indexInfo) {
+                    // Only mark as UNIQUE if the column is NOT NULL
+                    const colInfo = columns.find(c => c.name === col.name);
+                    if (colInfo && colInfo.notnull === 1) {
+                        uniqueColumns.add(col.name);
+                    }
+                }
+            }
+        }
+
         return columns.map(col => {
             let keyType: KeyType = null;
             if (col.pk > 0) {
                 keyType = 'PRIMARY';
             } else if (fkMap.has(col.name)) {
                 keyType = 'FOREIGN';
+            } else if (uniqueColumns.has(col.name)) {
+                keyType = 'UNIQUE';
             }
 
             return {
@@ -225,5 +255,128 @@ export class SQLiteSchemaProvider implements SchemaProvider {
             executionTimeMs,
             query: sql,
         };
+    }
+
+    async updateCell(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string,
+        primaryKeys: Record<string, unknown>,
+        columnName: string,
+        newValue: unknown
+    ): Promise<UpdateCellResult> {
+        try {
+            const db = await pool.getConnection(config) as SqlJsDatabase;
+            const escapedTable = `"${tableName.replace(/"/g, '""')}"`;
+            const escapedColumn = `"${columnName.replace(/"/g, '""')}"`;
+
+            const pkEntries = Object.entries(primaryKeys);
+            const whereClauses = pkEntries.map(([key]) => `"${key.replace(/"/g, '""')}" = ?`);
+            const params = [newValue, ...pkEntries.map(([, val]) => val)];
+
+            const updateSql = `UPDATE ${escapedTable} SET ${escapedColumn} = ? WHERE ${whereClauses.join(' AND ')}`;
+            db.run(updateSql, params as SqlValue[]);
+
+            // Re-fetch the updated row
+            const selectPkValues = pkEntries.map(([key, val]) => key === columnName ? newValue : val);
+            const selectQuery = `SELECT * FROM ${escapedTable} WHERE ${whereClauses.join(' AND ')}`;
+            const result = db.exec(selectQuery, selectPkValues as SqlValue[]);
+
+            await pool.saveSQLiteDatabase(config.id);
+
+            if (result.length > 0 && result[0].values.length > 0) {
+                return { success: true, updatedRow: result[0].values[0] as unknown[] };
+            }
+
+            return { success: true };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    }
+
+    async insertRow(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string,
+        values: Record<string, unknown>
+    ): Promise<InsertRowResult> {
+        try {
+            const db = await pool.getConnection(config) as SqlJsDatabase;
+            const escapedTable = `"${tableName.replace(/"/g, '""')}"`;
+
+            const entries = Object.entries(values);
+            let insertSql: string;
+            let params: unknown[];
+
+            if (entries.length === 0) {
+                insertSql = `INSERT INTO ${escapedTable} DEFAULT VALUES`;
+                params = [];
+            } else {
+                const columns = entries.map(([key]) => `"${key.replace(/"/g, '""')}"`);
+                const placeholders = entries.map(() => '?');
+                params = entries.map(([, val]) => val);
+                insertSql = `INSERT INTO ${escapedTable} (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`;
+            }
+
+            db.run(insertSql, params as SqlValue[]);
+
+            // Get the new row via last_insert_rowid()
+            const result = db.exec(`SELECT * FROM ${escapedTable} WHERE rowid = last_insert_rowid()`);
+
+            await pool.saveSQLiteDatabase(config.id);
+
+            if (result.length > 0 && result[0].values.length > 0) {
+                return { success: true, newRow: result[0].values[0] as unknown[] };
+            }
+
+            return { success: true };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    }
+
+    async deleteRow(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string,
+        primaryKeys: Record<string, unknown>
+    ): Promise<DeleteRowResult> {
+        try {
+            const db = await pool.getConnection(config) as SqlJsDatabase;
+            const escapedTable = `"${tableName.replace(/"/g, '""')}"`;
+
+            const pkEntries = Object.entries(primaryKeys);
+            const whereClauses = pkEntries.map(([key]) => `"${key.replace(/"/g, '""')}" = ?`);
+            const params = pkEntries.map(([, val]) => val);
+
+            const deleteSql = `DELETE FROM ${escapedTable} WHERE ${whereClauses.join(' AND ')}`;
+            db.run(deleteSql, params as SqlValue[]);
+
+            await pool.saveSQLiteDatabase(config.id);
+
+            return { success: true };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    }
+
+    async getTableDDL(
+        pool: ConnectionPool,
+        config: ConnectionConfigWithPassword,
+        tableName: string
+    ): Promise<string> {
+        const db = await pool.getConnection(config) as SqlJsDatabase;
+        const result = db.exec(
+            `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`,
+            [tableName]
+        );
+        if (result.length === 0 || result[0].values.length === 0 || !result[0].values[0][0]) {
+            throw new Error(`Table "${tableName}" not found`);
+        }
+        const ddl = result[0].values[0][0] as string;
+        return ddl.endsWith(';') ? ddl : ddl + ';';
     }
 }

@@ -6,7 +6,8 @@ import { TableInfo } from '../models/table';
 import { ColumnInfo } from '../models/column';
 import { getSchemaProvider, SortOptions } from '../providers/schema-provider';
 import { TableSearchPanel } from '../views/table-search-panel';
-import { TableDataPanel } from '../views/table-data-panel';
+import { TableDataPanel, buildEditabilityInfo, MutationCallbacks } from '../views/table-data-panel';
+import { ddlDocumentUris } from '../lsp/sql-language-server-client';
 
 // Simple LRU cache with TTL
 class LRUCache<K, V> {
@@ -121,15 +122,18 @@ export class TableTreeItem extends vscode.TreeItem {
     constructor(
         public readonly table: TableInfo,
         public readonly starred: boolean = false,
+        loadingDDL: boolean = false,
     ) {
         super(table.name, vscode.TreeItemCollapsibleState.Collapsed);
 
         this.tooltip = `${table.name} (${table.type})${starred ? ' ★' : ''}`;
-        this.description = table.type;
+        this.description = loadingDDL ? 'Fetching DDL...' : table.type;
         this.contextValue = starred ? 'table-starred' : 'table';
-        this.iconPath = starred
-            ? new vscode.ThemeIcon('star-full', new vscode.ThemeColor('charts.yellow'))
-            : new vscode.ThemeIcon('symbol-class');
+        this.iconPath = loadingDDL
+            ? new vscode.ThemeIcon('loading~spin')
+            : starred
+                ? new vscode.ThemeIcon('star-full', new vscode.ThemeColor('charts.yellow'))
+                : new vscode.ThemeIcon('symbol-class');
 
         // Double-click triggers viewTableData command
         this.command = {
@@ -210,6 +214,8 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
     private loadingConnections: Set<ConnectionId> = new Set();
     // Track connections that failed to load (prevents infinite retry on tree re-render)
     private failedConnections: Map<ConnectionId, string> = new Map();
+    // Track tables currently fetching DDL (connectionId:tableName)
+    private loadingDDLTables: Set<string> = new Set();
 
     constructor(
         private readonly connectionManager: ConnectionManager,
@@ -245,6 +251,16 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
     }
 
     fireTreeDataChange(): void {
+        this._onDidChangeTreeData.fire();
+    }
+
+    setDDLLoading(connectionId: string, tableName: string, loading: boolean): void {
+        const key = `${connectionId}:${tableName}`;
+        if (loading) {
+            this.loadingDDLTables.add(key);
+        } else {
+            this.loadingDDLTables.delete(key);
+        }
         this._onDidChangeTreeData.fire();
     }
 
@@ -307,7 +323,11 @@ export class ConnectionTreeProvider implements vscode.TreeDataProvider<TreeItem>
         if (cached) {
             const starredSet = this.connectionManager.getStorageForScope(connection.scope).getStarredTables(connection.id);
             const sorted = sortTablesStarredFirst(cached, starredSet);
-            return sorted.map(t => new TableTreeItem(t, starredSet.has(t.name)));
+            return sorted.map(t => new TableTreeItem(
+                t,
+                starredSet.has(t.name),
+                this.loadingDDLTables.has(`${connection.id}:${t.name}`),
+            ));
         }
 
         // Show error if previously failed (user can retry via toast or refresh button)
@@ -542,17 +562,52 @@ export function registerTreeView(
                 return;
             }
 
+            // Fetch column metadata for editability detection
+            const configWithPassword = await connectionManager.getConnectionWithPassword(table.connectionId);
+            let editabilityInfo;
+            let mutationCallbacks: MutationCallbacks | undefined;
+            if (configWithPassword) {
+                const provider = getSchemaProvider(connection.type);
+                try {
+                    const columns = await provider.listColumns(connectionPool, configWithPassword, table.name);
+                    editabilityInfo = buildEditabilityInfo(table.name, columns, table.type);
+                    if (editabilityInfo.editable) {
+                        mutationCallbacks = {
+                            async updateCell(tableName, primaryKeys, columnName, newValue) {
+                                const config = await connectionManager.getConnectionWithPassword(table.connectionId);
+                                if (!config) { return { success: false, error: 'Connection not found' }; }
+                                return provider.updateCell(connectionPool, config, tableName, primaryKeys, columnName, newValue);
+                            },
+                            async insertRow(tableName, values) {
+                                const config = await connectionManager.getConnectionWithPassword(table.connectionId);
+                                if (!config) { return { success: false, error: 'Connection not found' }; }
+                                return provider.insertRow(connectionPool, config, tableName, values);
+                            },
+                            async deleteRow(tableName, primaryKeys) {
+                                const config = await connectionManager.getConnectionWithPassword(table.connectionId);
+                                if (!config) { return { success: false, error: 'Connection not found' }; }
+                                return provider.deleteRow(connectionPool, config, tableName, primaryKeys);
+                            },
+                        };
+                    }
+                } catch {
+                    // Column metadata fetch failed — proceed without editability
+                }
+            }
+
             TableDataPanel.showTableData(
                 connection,
                 table,
                 async (sort?: SortOptions) => {
-                    const configWithPassword = await connectionManager.getConnectionWithPassword(table.connectionId);
-                    if (!configWithPassword) {
+                    const config = await connectionManager.getConnectionWithPassword(table.connectionId);
+                    if (!config) {
                         throw new Error('Connection not found');
                     }
                     const provider = getSchemaProvider(connection.type);
-                    return provider.queryTableData(connectionPool, configWithPassword, table.name, 100, sort);
-                }
+                    return provider.queryTableData(connectionPool, config, table.name, 100, sort);
+                },
+                editabilityInfo,
+                mutationCallbacks,
             );
         })
     );
@@ -565,6 +620,66 @@ export function registerTreeView(
                 return;
             }
             connectionManager.setActiveConnection(connection.id);
+        })
+    );
+
+    async function fetchTableDDL(item: TableTreeItem): Promise<string | null> {
+        const table = item?.table;
+        if (!table) {
+            vscode.window.showErrorMessage('Please select a table.');
+            return null;
+        }
+
+        const connection = connectionManager.getConnection(table.connectionId);
+        if (!connection) {
+            vscode.window.showErrorMessage('No active connection.');
+            return null;
+        }
+
+        const configWithPassword = await connectionManager.getConnectionWithPassword(table.connectionId);
+        if (!configWithPassword) {
+            vscode.window.showErrorMessage('No active connection.');
+            return null;
+        }
+
+        const provider = getSchemaProvider(connection.type);
+        return provider.getTableDDL(connectionPool, configWithPassword, table.name);
+    }
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('dbooly.showTableDDL', async (item: TableTreeItem) => {
+            treeProvider.setDDLLoading(item.table.connectionId, item.table.name, true);
+            try {
+                const ddl = await fetchTableDDL(item);
+                if (ddl === null) return;
+
+                const doc = await vscode.workspace.openTextDocument({ content: ddl, language: 'sql' });
+                ddlDocumentUris.add(doc.uri.toString());
+                await vscode.window.showTextDocument(doc);
+            } catch (err: unknown) {
+                const message = err instanceof Error ? err.message : String(err);
+                vscode.window.showErrorMessage(`Failed to get DDL: ${message}`);
+            } finally {
+                treeProvider.setDDLLoading(item.table.connectionId, item.table.name, false);
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('dbooly.copyTableDDL', async (item: TableTreeItem) => {
+            treeProvider.setDDLLoading(item.table.connectionId, item.table.name, true);
+            try {
+                const ddl = await fetchTableDDL(item);
+                if (ddl === null) return;
+
+                await vscode.env.clipboard.writeText(ddl);
+                vscode.window.showInformationMessage('DDL copied to clipboard');
+            } catch (err: unknown) {
+                const message = err instanceof Error ? err.message : String(err);
+                vscode.window.showErrorMessage(`Failed to get DDL: ${message}`);
+            } finally {
+                treeProvider.setDDLLoading(item.table.connectionId, item.table.name, false);
+            }
         })
     );
 

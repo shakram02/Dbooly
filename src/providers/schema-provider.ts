@@ -51,12 +51,37 @@ export interface QueryExecutionResult {
     query: string;
 }
 
+export interface UpdateCellResult {
+    success: boolean;
+    error?: string;
+    updatedRow?: unknown[];
+}
+
+export interface InsertRowResult {
+    success: boolean;
+    error?: string;
+    newRow?: unknown[];
+}
+
+export interface DeleteRowResult {
+    success: boolean;
+    error?: string;
+}
+
 export interface SchemaProvider {
     listTables(pool: ConnectionPool, config: ConnectionConfigWithPassword): Promise<TableInfo[]>;
     listColumns(pool: ConnectionPool, config: ConnectionConfigWithPassword, tableName: string): Promise<ColumnInfo[]>;
     queryTableData(pool: ConnectionPool, config: ConnectionConfigWithPassword, tableName: string, limit?: number, sort?: SortOptions): Promise<QueryResult>;
     /** Execute arbitrary SQL query with optional execution options */
     executeQuery(pool: ConnectionPool, config: ConnectionConfigWithPassword, sql: string, options?: QueryExecutionOptions): Promise<QueryExecutionResult>;
+    /** Update a single cell value in a table row identified by primary/unique keys */
+    updateCell(pool: ConnectionPool, config: ConnectionConfigWithPassword, tableName: string, primaryKeys: Record<string, unknown>, columnName: string, newValue: unknown): Promise<UpdateCellResult>;
+    /** Insert a new row into a table */
+    insertRow(pool: ConnectionPool, config: ConnectionConfigWithPassword, tableName: string, values: Record<string, unknown>): Promise<InsertRowResult>;
+    /** Delete a row from a table identified by primary/unique keys */
+    deleteRow(pool: ConnectionPool, config: ConnectionConfigWithPassword, tableName: string, primaryKeys: Record<string, unknown>): Promise<DeleteRowResult>;
+    /** Get the CREATE TABLE DDL statement for a table */
+    getTableDDL(pool: ConnectionPool, config: ConnectionConfigWithPassword, tableName: string): Promise<string>;
 }
 
 const providers: Record<DatabaseType, SchemaProvider> = {

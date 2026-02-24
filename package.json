@@ -169,6 +169,18 @@
         "title": "Format SQL",
         "category": "dbooly",
         "icon": "$(symbol-color)"
+      },
+      {
+        "command": "dbooly.showTableDDL",
+        "title": "Show DDL",
+        "category": "dbooly",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "dbooly.copyTableDDL",
+        "title": "Copy DDL",
+        "category": "dbooly",
+        "icon": "$(clippy)"
       }
     ],
     "viewsContainers": {
@@ -285,6 +297,16 @@
           "command": "dbooly.unstarTable",
           "when": "view == dbooly.connections && viewItem == table-starred",
           "group": "2_star"
+        },
+        {
+          "command": "dbooly.showTableDDL",
+          "when": "view == dbooly.connections && viewItem =~ /^table/",
+          "group": "3_ddl@1"
+        },
+        {
+          "command": "dbooly.copyTableDDL",
+          "when": "view == dbooly.connections && viewItem =~ /^table/",
+          "group": "3_ddl@2"
         },
         {
           "command": "dbooly.openScript",
