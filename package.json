@@ -1,7 +1,7 @@
 {
   "name": "dbooly",
   "displayName": "dbooly",
-  "description": "MySQL, PostgreSQL & SQLite viewer and query tool for VSCode",
+  "description": "Database client for VSCode — MySQL, PostgreSQL & SQLite explorer, query runner, and inline data editor",
   "version": "0.6.0",
   "publisher": "shakram02",
   "license": "MIT",
