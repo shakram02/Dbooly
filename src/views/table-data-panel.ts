@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ConnectionConfig } from '../models/connection';
+import { ConnectionConfig, isMySQLConnection } from '../models/connection';
 import { TableInfo } from '../models/table';
 import { ColumnInfo } from '../models/column';
 import { QueryResult, SortOptions, SortDirection, QueryExecutionResult, UpdateCellResult, InsertRowResult, DeleteRowResult } from '../providers/schema-provider';
@@ -21,6 +21,13 @@ export interface MutationCallbacks {
     updateCell(tableName: string, primaryKeys: Record<string, unknown>, columnName: string, newValue: unknown): Promise<UpdateCellResult>;
     insertRow(tableName: string, values: Record<string, unknown>): Promise<InsertRowResult>;
     deleteRow(tableName: string, primaryKeys: Record<string, unknown>): Promise<DeleteRowResult>;
+}
+
+function getConnectionSubtitle(connection: ConnectionConfig): string {
+    if (isMySQLConnection(connection)) {
+        return `${connection.name} - ${connection.host}:${connection.port}/${connection.database}`;
+    }
+    return `${connection.name} - ${connection.filePath}`;
 }
 
 function getNonce(): string {
@@ -135,7 +142,7 @@ export class TableDataPanel {
 
         const config: PanelConfig = {
             title: table.name,
-            subtitle: `${connection.name} - ${connection.host}:${connection.port}/${connection.database}`,
+            subtitle: getConnectionSubtitle(connection),
             mode: 'table',
         };
 
@@ -262,7 +269,7 @@ export class TableDataPanel {
     ): void {
         this.config = {
             title: table.name,
-            subtitle: `${connection.name} - ${connection.host}:${connection.port}/${connection.database}`,
+            subtitle: getConnectionSubtitle(connection),
             mode: 'table',
         };
         this.getData = getData;
